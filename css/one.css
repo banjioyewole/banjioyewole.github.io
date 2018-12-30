@@ -49,6 +49,13 @@ color: white;
   margin: 10px 25px;
 }
 
+.everyman_img_ctr{
+  float:center;
+  width: 90px;
+  height:90px;
+  margin: 10px 25px;
+}
+
 
 .column_image {
     float: left;

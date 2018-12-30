@@ -94,6 +94,7 @@ app.use(express.static(path.join(__dirname, '/img')));
 app.use(express.static(__dirname + '/public'));
 app.use(express.static(__dirname + '/css'));
 app.use(express.static(__dirname + '/views'));
+app.use(express.static(__dirname + '/js'));
 
 
 app.get('',function(req,res){
@@ -103,6 +104,11 @@ app.get('',function(req,res){
 });
 
 
+app.get('/woo',function(req,res){
+  console.log(colors.white.bgCyan(req.headers));
+  // console.log(res);
+      res.sendFile(__dirname + "/views/sample.html");
+});
 
 app.get('/',function(req,res){
   console.log(colors.white.bgCyan(req.headers));
