@@ -23,7 +23,8 @@ color: white;
 
 container{
   display: flex;
- flex-direction: row;
+  flex-direction: row;
+  margin: auto;
 }
 
 .container_one{
@@ -31,6 +32,7 @@ container{
   /* float: left; */
   width:44%;
   margin:0 5%;
+  margin-top: 10%;
   order: 0;
 
 }
