@@ -1,3 +1,6 @@
+var DEFAULT_PORT = 3000;
+
+
 var express = require("express");
 var app     = express();
 var path    = require("path");
@@ -5,7 +8,6 @@ var multer  =   require('multer');
 var favicon = require('serve-favicon');
 var sharp = require('sharp');
 // var resizeImage = require('resize-image');
-
 var colors = require('colors');
 
 var debug = true;
@@ -91,14 +93,21 @@ app.use(favicon(path.join(__dirname, 'public', 'favicon.ico')));
 app.use(express.static(path.join(__dirname, '/img')));
 app.use(express.static(__dirname + '/public'));
 app.use(express.static(__dirname + '/css'));
+app.use(express.static(__dirname + '/views'));
 
+
+app.get('',function(req,res){
+  console.log(colors.white.bgCyan(req.headers));
+  // console.log(res);
+      res.sendFile(__dirname + "/views/index_core.html");
+});
 
 
 
 app.get('/',function(req,res){
   console.log(colors.white.bgCyan(req.headers));
   // console.log(res);
-      res.sendFile(__dirname + "/views/index.html");
+      res.sendFile(__dirname + "/views/index_core.html");
 });
 
 app.get('/efarrari',function(req,res){
@@ -228,8 +237,8 @@ var sendJsonResponse = function(res, status, content) {
 // app.listen(config.port, config.host, function () {
 //   console.long("Working on port " + config.port)
 // }
-app.listen(process.env.PORT,function(){
-    console.log("Working on port " + process.env.PORT);
+app.listen((process.env.PORT || DEFAULT_PORT),function(){
+    console.log("Working on port " + (process.env.PORT || DEFAULT_PORT));
 });
 
 function getExtension(filename) {

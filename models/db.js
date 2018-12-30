@@ -1,7 +1,7 @@
 var mongoose = require( 'mongoose' );
 var gracefulShutdown;
 // var dbURI = 'mongodb://localhost/efarrari';
-dbURI = process.env.MONFUSE;
+dbURI = process.env.MONFUSE || 'mongodb://localhost/efarrari';
 if (process.env.NODE_ENV === 'production') {
   dbURI = process.env.MONGOLAB_URI;
   // dbURI = 'mongodb://starkey:Italia599@ds023108.mlab.com:23108/db10';
