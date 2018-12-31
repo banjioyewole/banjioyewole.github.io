@@ -28,14 +28,14 @@ container{
   flex-direction: row;
   margin: auto;
   flex-wrap: wrap;
+   align-items: center;
 }
 
 .container_one{
   min-width: 450px;
   /* float: left; */
   width:44%;
-  margin:0 5%;
-  margin-top: 10%;
+  margin:5% 5%;
   order: 0;
 
 }
