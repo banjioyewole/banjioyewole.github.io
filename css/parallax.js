@@ -18,7 +18,8 @@ elem = $('.video_box')
 
 // console.log($('.parallax--box').scrollTop());
 
-  $('.container_one').css('margin-top',  ( ($(window).height() - $('.container_one').height()) /.765)  + 'px')
+  // $('.container_one').css('margin-top',  ( ($(window).height() - $('.container_one').height())/.5)  + 'px')
+  // $('.video_box').css('margin-top',  ( ($(window).height() - $('.video_box').height())/.5)  + 'px')
 
 
   // console.log(wScroll)

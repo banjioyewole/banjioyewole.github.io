@@ -21,12 +21,19 @@ color: white;
   margin-top: 16px;
 }
 
+container{
+  display: flex;
+  flex-direction: row;
+  margin: auto;
+}
 
 .container_one{
   min-width: 450px;
-  float: left;
+  /* float: left; */
   width:44%;
   margin:0 5%;
+  margin-top: 10%;
+  order: 0;
 
 }
 
@@ -34,7 +41,8 @@ color: white;
   min-width: 450px;
   margin-left: 8%;
   width: 38%;
-  float:left;
+  order: 1;
+  /* float:left; */
 }
 
 .video_box{
