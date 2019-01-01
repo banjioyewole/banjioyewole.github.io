@@ -64,7 +64,7 @@ container{
 
 .video_box{
   margin:0 0%;
-  /* transform: scale(0.75); */
+  transform: scale(0.9);
 }
 
 .everyman_img{
