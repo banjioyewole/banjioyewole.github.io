@@ -62,6 +62,13 @@ container{
   /* float:left; */
 }
 
+.container_three_one{
+  margin-left: 2%;
+  width: 25%;
+  order: 1;
+  /* float:left; */
+}
+
 .video_box{
   margin:0 0%;
   transform: scale(0.9);
