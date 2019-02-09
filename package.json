@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "dependencies": {
     "colors": "^1.1.2",
-    "express": "^4.13.3",
+    "express": "^4.16.4",
     "mongoose": "^4.4.17",
     "morgan": "*",
     "multer": "1.1.0",
