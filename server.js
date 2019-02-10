@@ -1,6 +1,6 @@
 var DEFAULT_PORT = 3000;
 
-
+var sslRedirect = require("heroku-ssl-redirect");
 var express = require("express");
 var app     = express();
 var path    = require("path");
@@ -33,7 +33,7 @@ var storage =   multer.diskStorage({
 var upload = multer({ storage : storage});
 var uploadia = upload.single('userPhoto');
 
-
+app.use(sslRedirect());
 
 app.get('/api/ip_disco', function (req, res){
   //

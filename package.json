@@ -4,6 +4,7 @@
   "dependencies": {
     "colors": "^1.1.2",
     "express": "^4.16.4",
+    "heroku-ssl-redirect": "0.0.4",
     "mongoose": "^4.4.17",
     "morgan": "*",
     "multer": "1.1.0",
