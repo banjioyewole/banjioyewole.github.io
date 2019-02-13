@@ -122,7 +122,10 @@ app.get('/efarrari',function(req,res){
 });
 
   app.get('/software',function(req,res){
-    res.sendFile(path.join(__dirname+'/views/software.html'));
+    res.redirect('/');
+
+    // res.sendFile(__dirname + "/views/index_core.html");
+    // res.sendFile(path.join(__dirname+'/views/software.html'));
     //__dirname : It will resolve to your project folder.
   });
 
@@ -133,18 +136,24 @@ app.get('/efarrari',function(req,res){
   });
 
   app.get('/myngo',function(req,res){
-    res.sendFile(path.join(__dirname+'/views/myngo.html'));
+    res.redirect('/');
+
+    // res.sendFile(path.join(__dirname+'/views/myngo.html'));
     //__dirname : It will resolve to your project folder.
   });
 
   app.get('/hd_project',function(req,res){
-    res.sendFile(path.join(__dirname+'/views/hd_project.html'));
+    res.redirect('/');
+
+    // res.sendFile(path.join(__dirname+'/views/hd_project.html'));
     //__dirname : It will resolve to your project folder.
   });
 
 
   app.get('/material_flashlight',function(req,res){
-    res.sendFile(path.join(__dirname+'/views/material_flashlight.html'));
+    res.redirect('/');
+
+    // res.sendFile(path.join(__dirname+'/views/material_flashlight.html'));
     //__dirname : It will resolve to your project folder.
   });
 
@@ -215,14 +224,14 @@ app.get('/efarrari/upload',function(req,res){
   //__dirname : It will resolve to your project folder.
 });
 
-app.get('/about',function(req,res){
-  res.sendFile(path.join(__dirname+'/about.html'));
-
-});
-
-app.get('/sitemap',function(req,res){
-  res.sendFile(path.join(__dirname+'/sitemap.html'));
-});
+// app.get('/about',function(req,res){
+//   res.sendFile(path.join(__dirname+'/about.html'));
+//
+// });
+// 
+// app.get('/sitemap',function(req,res){
+//   res.sendFile(path.join(__dirname+'/sitemap.html'));
+// });
 
 
 // catch 404 and forward to error handler
