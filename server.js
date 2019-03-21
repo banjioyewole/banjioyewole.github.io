@@ -110,6 +110,11 @@ app.get('/woo',function(req,res){
       res.sendFile(__dirname + "/views/sample.html");
 });
 
+app.get('/gem', function(req,res){
+  res.sendFile(__dirname + "/views/gem.html");
+
+})
+
 app.get('/',function(req,res){
   console.log(colors.white.bgCyan(req.headers));
   // console.log(res);
@@ -228,7 +233,7 @@ app.get('/efarrari/upload',function(req,res){
 //   res.sendFile(path.join(__dirname+'/about.html'));
 //
 // });
-// 
+//
 // app.get('/sitemap',function(req,res){
 //   res.sendFile(path.join(__dirname+'/sitemap.html'));
 // });
