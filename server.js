@@ -115,6 +115,11 @@ app.get('/gem', function(req,res){
 
 })
 
+app.get('/github', function(req,res){
+  res.redirect("https://github.com/banjioyewole");
+
+})
+
 app.get('/',function(req,res){
   console.log(colors.white.bgCyan(req.headers));
   // console.log(res);
