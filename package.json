@@ -5,7 +5,7 @@
     "colors": "^1.1.2",
     "express": "^4.16.4",
     "heroku-ssl-redirect": "0.0.4",
-    "mongoose": "^4.4.17",
+    "mongoose": "^4.13.21",
     "morgan": "*",
     "multer": "1.1.0",
     "serve-favicon": "*",
