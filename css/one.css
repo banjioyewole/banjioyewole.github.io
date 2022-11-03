@@ -10,7 +10,7 @@ line-height: 60px;
 }
 
 
-.hØ {
+.hNot {
 font-family: 'Roboto', sans-serif;
 font-size: 16px;
 font-weight:bold;
@@ -21,6 +21,10 @@ color: white;
 
 .h88{
   margin-top: 8px;
+}
+
+.thin_man_end{
+  min-height: 120vh;
 }
 
 
@@ -174,9 +178,9 @@ a {
       margin: auto;
       left: 0;
       right: 0;
-      top: -18%;
+      top: -10%;
       bottom: 0;
-      width: 90%;
+      width: 80%;
       max-width: 1440px;
       max-height: 80%;
 }
