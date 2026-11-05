@@ -1,0 +1,68 @@
+/* Starfield background + 3D hero */
+html { background: #000; }
+body.space { background: transparent; margin: 0; }
+
+#starfield {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -3;
+  pointer-events: none;
+}
+
+/* moving grain sits over the background layers (stars + 3D hero) but under page content */
+#filmgrain {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.13;
+}
+
+.hero3d {
+  position: relative;
+  height: 100vh;
+  height: 100svh;
+  min-height: 520px;
+  overflow: hidden;
+}
+
+#hero3d-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: -2;
+  opacity: 0;
+  transition: opacity 0.9s ease;
+}
+#hero3d-canvas.is-ready { opacity: 1; }
+
+/* resume link + scroll arrow sit on top of the canvas, pinned to the bottom */
+.hero3d-ui {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.hero3d-ui a { pointer-events: auto; }
+
+.hero3d-fallback { display: none; }
+.hero3d.no-webgl .hero3d-fallback { display: block; }
+.hero3d.no-webgl #hero3d-canvas { display: none; }
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
