@@ -1,10 +1,10 @@
 // Hero: 3D globules + extruded name/tagline.
-// Globules are extracted from the old wallpaper (assets/reigonalpha6.jpg) and rebuilt
-// offline as closed 3D blobs (see loadBlobGeometry).
+// Globules: see js/lava.js (raymarched lava lamp seeded with the old wallpaper's shapes).
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
+import { createLava } from './lava.js';
 
 export const BASE = new URL('../assets/hero3d/', import.meta.url);
 
@@ -23,116 +23,6 @@ function gradientAt(t, out) {
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// 3D simplex noise — Ashima Arts / Stefan Gustavson (MIT), github.com/stegu/webgl-noise
-const SIMPLEX_GLSL = /* glsl */`
-vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 permute(vec4 x){return mod289(((x*34.0)+10.0)*x);}
-vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
-float snoise(vec3 v){
-  const vec2 C=vec2(1.0/6.0,1.0/3.0); const vec4 D=vec4(0.0,0.5,1.0,2.0);
-  vec3 i=floor(v+dot(v,C.yyy)); vec3 x0=v-i+dot(i,C.xxx);
-  vec3 g=step(x0.yzx,x0.xyz); vec3 l=1.0-g; vec3 i1=min(g.xyz,l.zxy); vec3 i2=max(g.xyz,l.zxy);
-  vec3 x1=x0-i1+C.xxx; vec3 x2=x0-i2+C.yyy; vec3 x3=x0-D.yyy;
-  i=mod289(i);
-  vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
-  float n_=0.142857142857; vec3 ns=n_*D.wyz-D.xzx;
-  vec4 j=p-49.0*floor(p*ns.z*ns.z); vec4 x_=floor(j*ns.z); vec4 y_=floor(j-7.0*x_);
-  vec4 x=x_*ns.x+ns.yyyy; vec4 y=y_*ns.x+ns.yyyy; vec4 h=1.0-abs(x)-abs(y);
-  vec4 b0=vec4(x.xy,y.xy); vec4 b1=vec4(x.zw,y.zw);
-  vec4 s0=floor(b0)*2.0+1.0; vec4 s1=floor(b1)*2.0+1.0; vec4 sh=-step(h,vec4(0.0));
-  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy; vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
-  vec3 p0=vec3(a0.xy,h.x); vec3 p1=vec3(a0.zw,h.y); vec3 p2=vec3(a1.xy,h.z); vec3 p3=vec3(a1.zw,h.w);
-  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
-  p0*=norm.x; p1*=norm.y; p2*=norm.z; p3*=norm.w;
-  vec4 m=max(0.5-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0); m=m*m;
-  return 105.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
-}`;
-
-// Matte globule material with a "lava lamp" vertex deformation. uAmp = 0 renders the exact
-// extracted shape; as uAmp rises the surface swells and flows with drifting 3D noise
-// (the field scrolls upward, like wax rising), and normals are rebuilt so shading follows.
-export function blobMaterial(map, size = 1000, seed = 0) {
-  const mat = new THREE.MeshStandardMaterial({
-    map,
-    emissiveMap: map,
-    emissive: 0xffffff,
-    emissiveIntensity: 0.3,
-    roughness: 1.0,
-    metalness: 0.0,
-    envMapIntensity: 0.0
-  });
-  const uniforms = {
-    uTime: { value: 0 },
-    uAmp: { value: 0 },
-    uSize: { value: size },
-    uSeed: { value: seed }
-  };
-  mat.userData.lava = uniforms;
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>
-uniform float uTime; uniform float uAmp; uniform float uSize; uniform float uSeed;
-${SIMPLEX_GLSL}
-vec3 lava(vec3 p, vec3 n) {
-  vec3 q = p * (0.7 / uSize) + vec3(uSeed * 7.3, uSeed * 3.1, uSeed * 5.7);
-  float t = uTime * 0.16;
-  // large, slow, smooth undulations (wax), with only a whisper of a second octave
-  float d = snoise(q + vec3(0.0, -t, t * 0.35)) * 0.88
-          + snoise(q * 1.7 + vec3(t * 0.4, -t * 0.7, -t * 0.3)) * 0.12;
-  // swell along the normal, plus a slow vertical stretch/squash like rising wax
-  vec3 o = p + n * d * uAmp * uSize * 0.17;
-  o.y *= 1.0 + uAmp * 0.12 * sin(uTime * 0.21 + uSeed * 4.0);
-  return o;
-}`)
-      .replace('#include <beginnormal_vertex>', `vec3 objectNormal = vec3( normal );
-vec3 lavaPos = position;
-if (uAmp > 0.0001) {
-  vec3 tA = normalize(cross(objectNormal, abs(objectNormal.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-  vec3 tB = cross(objectNormal, tA);
-  float e = uSize * 0.004;
-  vec3 p0 = lava(position, objectNormal);
-  vec3 p1 = lava(position + tA * e, objectNormal);
-  vec3 p2 = lava(position + tB * e, objectNormal);
-  lavaPos = p0;
-  vec3 nn = normalize(cross(p1 - p0, p2 - p0));
-  objectNormal = dot(nn, normal) < 0.0 ? -nn : nn;
-}
-#ifdef USE_TANGENT
-  vec3 objectTangent = vec3( tangent.xyz );
-#endif`)
-      .replace('#include <begin_vertex>', 'vec3 transformed = lavaPos;');
-  };
-  return mat;
-}
-
-// Globules are closed, watertight meshes built offline (marching cubes over an inflated,
-// completed silhouette). Binary: uint16 xyz quantised to meta.min..max, then the indices.
-export async function loadBlobGeometry(meta) {
-  const buf = await fetch(new URL(`blob_${meta.name}.bin`, BASE)).then((r) => r.arrayBuffer());
-  const n = meta.vertexCount;
-  const q = new Uint16Array(buf, 0, n * 3);
-  const pos = new Float32Array(n * 3);
-  const uv = new Float32Array(n * 2);
-  for (let i = 0; i < n; i++) {
-    for (let a = 0; a < 3; a++) pos[i * 3 + a] = meta.min[a] + (q[i * 3 + a] / 65535) * (meta.max[a] - meta.min[a]);
-    // planar projection of the wallpaper colours (front-on), bbox-centred
-    uv[i * 2] = pos[i * 3] / meta.w + 0.5;
-    uv[i * 2 + 1] = pos[i * 3 + 1] / meta.h + 0.5;
-  }
-  const idxOffset = n * 3 * 2;
-  const index = meta.index32
-    ? new Uint32Array(buf, idxOffset, meta.indexCount)
-    : new Uint16Array(buf, idxOffset, meta.indexCount);
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  geo.setIndex(new THREE.BufferAttribute(index, 1));
-  geo.computeVertexNormals();
-  return geo;
-}
-
 export async function initHero(canvas, hero) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -143,7 +33,6 @@ export async function initHero(canvas, hero) {
   const pmrem = new THREE.PMREMGenerator(renderer);
   scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
-  const camera = new THREE.PerspectiveCamera(20, 1, 10, 20000);
 
   function addLights(target) {
     target.add(new THREE.AmbientLight(0xffffff, 0.55));
@@ -157,30 +46,10 @@ export async function initHero(canvas, hero) {
   addLights(scene);
   renderer.autoClear = false;
 
-  const [blobMeta, fontJson] = await Promise.all([
-    fetch(new URL('blobs.json', BASE)).then((r) => r.json()),
+  const [lava, fontJson] = await Promise.all([
+    createLava(renderer, BASE, { reduceMotion }),
     fetch(new URL('roboto_black_italic.subset.json', BASE)).then((r) => r.json())
   ]);
-
-  // ---------- Globules ----------
-  const texLoader = new THREE.TextureLoader();
-  const blobs = await Promise.all(blobMeta.blobs.map((b, i) => buildBlob(b, i)));
-  blobs.forEach((b) => scene.add(b.pivot));
-
-  async function buildBlob(meta, index) {
-    const [map, geo] = await Promise.all([
-      texLoader.loadAsync(new URL(`blob_${meta.name}.webp`, BASE).href),
-      loadBlobGeometry(meta)
-    ]);
-    map.colorSpace = THREE.SRGBColorSpace;
-    map.anisotropy = 4;
-    const mesh = new THREE.Mesh(geo, blobMaterial(map, Math.max(meta.w, meta.h), index + 1));
-    mesh.frustumCulled = false; // deformation moves vertices past the static bounds
-    // geometry is centred on the blob's bbox centre; the pivot moves it into place
-    const pivot = new THREE.Group();
-    pivot.add(mesh);
-    return { meta, pivot, mesh, phase: index * 1.7 + 0.4 };
-  }
 
   // ---------- Name + tagline ----------
   // Same size and placement as the old flat artwork (assets/HERO_SAPPHIRE.png), seen by a
@@ -304,26 +173,7 @@ export async function initHero(canvas, hero) {
     // the canvas is fixed to the viewport: globules stay behind the whole site
     vw = Math.max(1, canvas.clientWidth); vh = Math.max(1, canvas.clientHeight);
     renderer.setSize(vw, vh, false);
-    camera.aspect = vw / vh;
-    // 1 world unit == 1 CSS pixel on the z = 0 plane
-    camera.position.set(0, 0, (vh / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
-    camera.near = 10; camera.far = camera.position.z * 4;
-    camera.updateProjectionMatrix();
-
-    // globules: on landscape screens this matches the old `background-size: cover`
-    // wallpaper; each blob is pinned to its own corner so portrait/phone screens keep all four.
-    const iw = blobMeta.imageW, ih = blobMeta.imageH;
-    const s = Math.min(Math.max(vw / iw, vh / ih), (vw / iw) * (vw < vh ? 1.3 : 1.7));
-    for (const b of blobs) {
-      const m = b.meta;
-      const left = m.name[1] === 'l', top = m.name[0] === 't';
-      const cx = left ? (m.x + m.w / 2) * s : vw - (iw - (m.x + m.w / 2)) * s;
-      const cy = top ? (m.y + m.h / 2) * s : vh - (ih - (m.y + m.h / 2)) * s;
-      b.base = new THREE.Vector3(cx - vw / 2, vh / 2 - cy, -40);
-      b.scale = s;
-      b.pivot.scale.setScalar(s);
-      b.pivot.position.copy(b.base);
-    }
+    lava.layout(vw, vh, renderer.getPixelRatio());
 
     // text: same box as the old <img class="hero-transparent">: 80% wide (max 1440px),
     // centred horizontally, vertically centred at 45% of the hero (top: -10%; bottom: 0)
@@ -350,11 +200,16 @@ export async function initHero(canvas, hero) {
   }, { passive: true });
 
   const clock = new THREE.Clock();
+  // ?lavaSpeed=8 fast-forwards the animation (handy for previewing the lava lamp); ?debug exposes it
+  const params = new URLSearchParams(location.search);
+  const TIME_SCALE = Number(params.get('lavaSpeed')) || 1;
+  if (params.has('debug')) window.__lava = lava;
+  let lastT = 0, lastScroll = 0, lastFrame = performance.now();
 
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
   function frame() {
-    const t = reduceMotion ? 0 : clock.getElapsedTime();
+    const t = reduceMotion ? 0 : clock.getElapsedTime() * TIME_SCALE;
     eased.lerp(pointer, 0.05);
 
     // ---- name: scrolls away with the hero, always face-on ----
@@ -370,29 +225,15 @@ export async function initHero(canvas, hero) {
       -eased.y * vh * 0.06 + Math.sin(t * 0.27) * vh * 0.01
     );
 
-    // ---- globules: start as the original composition, then ease into a lava lamp ----
-    const lava = reduceMotion ? 0 : smooth(2.5, 10.0, t);
-    for (const b of blobs) {
-      if (!b.base) continue;
-      const ph = b.phase;
-      const u = b.mesh.material.userData.lava;
-      u.uTime.value = t;
-      u.uAmp.value = lava;
-      // slow wandering: rise and sink, sway sideways, turn — all scaled in by `lava`
-      b.pivot.position.set(
-        b.base.x - eased.x * 14 + lava * Math.sin(t * 0.07 + ph) * vw * 0.04,
-        b.base.y + eased.y * 10 + lava * Math.sin(t * 0.05 + ph * 1.7) * vh * 0.09,
-        b.base.z
-      );
-      b.pivot.rotation.set(
-        Math.sin(t * 0.3 + ph) * 0.07 * (1 - lava) + eased.y * 0.08 + lava * Math.sin(t * 0.06 + ph) * 0.35,
-        Math.cos(t * 0.25 + ph) * 0.09 * (1 - lava) + eased.x * 0.1 + lava * Math.sin(t * 0.045 + ph * 2.0) * 0.6,
-        lava * Math.sin(t * 0.03 + ph) * 0.25
-      );
-      b.pivot.scale.setScalar(b.scale * (1 + lava * 0.06 * Math.sin(t * 0.23 + ph * 3.0)));
-    }
+    // ---- globules: lava lamp (js/lava.js); scrolling lifts it at 0.35× ----
+    const now = performance.now(), frameMs = now - lastFrame; lastFrame = now;
+    const dt = Math.max(0, t - lastT); lastT = t;
+    lava.update(dt, scrollOffset - lastScroll, eased, frameMs);
+    lastScroll = scrollOffset;
+
+    renderer.setClearColor(0x000000, 0);
     renderer.clear();
-    renderer.render(scene, camera);
+    lava.render();
     if (text.visible) {
       renderer.clearDepth();
       renderer.render(textScene, textCamera);
@@ -407,6 +248,7 @@ export async function initHero(canvas, hero) {
   new ResizeObserver(() => { layout(); readScroll(); frame(); }).observe(canvas);
   layout();
   readScroll();
+  lastScroll = scrollOffset;
   frame();
   if (!reduceMotion) requestAnimationFrame(loop);
   canvas.classList.add('is-ready');
