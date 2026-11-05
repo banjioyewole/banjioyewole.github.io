@@ -25,16 +25,21 @@ function gradientAt(t, out) {
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// Dynamic film grain over the transparent canvas (so over the stars behind it too). One noise
-// tile; ~24 times a second it jumps to a random offset, so the grain "boils" like film.
+// Dynamic film grain. One noise tile; ~24 times a second it jumps to a random offset, so the
+// grain "boils" like film. Two blends, so it never greys the colours:
+//  • over anything already drawn (globules, extrusion walls): multiply, which only changes
+//    brightness, keeping hue and saturation, and leaves black alone
+//  • where the canvas is still empty (sky and stars behind it): a faint light/dark speckle
 function createGrain(renderer) {
-  const TILE = 512, STRENGTH = 0.13, FPS = 24;
+  const TILE = 512, MULTIPLY = 0.035, SKY = 0.1, FPS = 24;
   const data = new Uint8Array(TILE * TILE * 4);
+  const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
   for (let i = 0; i < data.length; i += 4) {
-    const g = Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()); // ~N(0,1)
-    const a = Math.min(1, Math.abs(g) * 70 / 255) * STRENGTH;
-    data[i] = data[i + 1] = data[i + 2] = g > 0 ? a * 255 : 0;   // light and dark specks (premultiplied)
-    data[i + 3] = a * 255;
+    const g = gauss(), s = gauss();
+    const a = Math.min(1, Math.abs(s) * 70 / 255) * SKY;
+    data[i] = Math.max(0, Math.min(255, (0.5 + g * MULTIPLY / 2) * 255));   // R: multiply factor, 0.5 = no change
+    data[i + 1] = s > 0 ? a * 255 : 0;                                      // G: sky speckle (premultiplied)
+    data[i + 3] = a * 255;                                                  // A: sky speckle coverage
   }
   const tile = new THREE.DataTexture(data, TILE, TILE, THREE.RGBAFormat);
   tile.wrapS = tile.wrapT = THREE.RepeatWrapping;
@@ -42,19 +47,28 @@ function createGrain(renderer) {
   tile.needsUpdate = true;
 
   const uniforms = { uTile: { value: tile }, uOffset: { value: new THREE.Vector2() }, uScale: { value: 1 } };
-  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3,
-    vertexShader: 'in vec3 position; void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
-    fragmentShader: `precision highp float;
-      uniform sampler2D uTile; uniform vec2 uOffset; uniform float uScale;
-      out vec4 outColor;
-      void main() { outColor = texture(uTile, gl_FragCoord.xy * uScale + uOffset); }`,
-    uniforms, transparent: true, depthTest: false, depthWrite: false,
-    blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
-    blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor
-  }));
-  quad.frustumCulled = false;
-  const scene = new THREE.Scene(); scene.add(quad);
+  const scene = new THREE.Scene();
+  const pass = (output, blending, order) => {
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: 'in vec3 position; void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: `precision highp float;
+        uniform sampler2D uTile; uniform vec2 uOffset; uniform float uScale;
+        out vec4 outColor;
+        void main() { vec4 t = texture(uTile, gl_FragCoord.xy * uScale + uOffset); outColor = ${output}; }`,
+      uniforms, transparent: true, depthTest: false, depthWrite: false,
+      blending: THREE.CustomBlending, ...blending
+    }));
+    quad.frustumCulled = false;
+    quad.renderOrder = order;
+    scene.add(quad);
+  };
+  // result = 2 × factor × what's there; alpha untouched
+  pass('vec4(t.rrr, 0.0)', { blendSrc: THREE.DstColorFactor, blendDst: THREE.SrcColorFactor,
+    blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor }, 1);
+  // drawn behind what's there, so it only lands on the empty part of the canvas
+  pass('vec4(t.ggg, t.a)', { blendSrc: THREE.OneMinusDstAlphaFactor, blendDst: THREE.OneFactor,
+    blendSrcAlpha: THREE.OneMinusDstAlphaFactor, blendDstAlpha: THREE.OneFactor }, 2);
   const cam = new THREE.Camera();
   let last = -Infinity;
   return {
@@ -70,6 +84,9 @@ export async function initHero(canvas, hero) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // Wide-gamut screens show these same values more saturated, for extra vividness. Browsers or
+  // screens without Display P3 just stay in sRGB.
+  renderer.getContext().drawingBufferColorSpace = 'display-p3';
   renderer.toneMapping = THREE.NoToneMapping;
 
   const scene = new THREE.Scene();

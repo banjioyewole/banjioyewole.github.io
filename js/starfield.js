@@ -11,6 +11,8 @@
 
   var TILT = 12.5 * Math.PI / 180;
   var DX = Math.sin(TILT), DY = -Math.cos(TILT);
+  var SPEED = 0.15; // overall drift speed
+  var PARALLAX = 0.08; // stars scroll with the page, far slower than it
   var MARGIN = 80; // stars wrap this far off screen, so their tails clear the edge first
 
   // Three populations, sized in CSS px for a 1440-wide window (the image's scale at that width).
@@ -96,7 +98,7 @@
     var r = Math.random(), i = 0;
     while (i < TIERS.length - 1 && r > TIERS[i].share) { r -= TIERS[i].share; i++; }
     var s = pick(sprites[i]);
-    return { x: x, y: y, sprite: s, speed: s.len * rand(0.9, 1.6) }; // px/s; longer streaks move faster
+    return { x: x, y: y, sprite: s, speed: s.len * rand(0.9, 1.6) * SPEED }; // px/s; longer streaks move faster
   }
 
   function resize() {
@@ -124,7 +126,7 @@
     ctx.clearRect(0, 0, w, h);
     ctx.globalCompositeOperation = 'lighter'; // overlapping streaks add up, like light on film
 
-    var spanX = w + MARGIN * 2, spanY = h + MARGIN * 2;
+    var spanX = w + MARGIN * 2, spanY = h + MARGIN * 2, lift = window.pageYOffset * PARALLAX;
     for (var i = 0; i < stars.length; i++) {
       var s = stars[i];
       s.x += DX * s.speed * dt; s.y += DY * s.speed * dt;
@@ -132,7 +134,8 @@
       if (s.y < -MARGIN) { s.y += spanY; s.x -= spanY * DX / -DY; }
       if (s.x > w + MARGIN) s.x -= spanX; else if (s.x < -MARGIN) s.x += spanX;
       var sp = s.sprite;
-      ctx.drawImage(sp.canvas, s.x - sp.ax, s.y - sp.ay, sp.w, sp.h);
+      var y = ((s.y - lift + MARGIN) % spanY + spanY) % spanY - MARGIN;
+      ctx.drawImage(sp.canvas, s.x - sp.ax, y - sp.ay, sp.w, sp.h);
     }
   }
 
@@ -146,6 +149,7 @@
   }
 
   window.addEventListener('resize', function () { resize(); if (reduceMotion) draw(0); });
+  if (reduceMotion) window.addEventListener('scroll', function () { draw(0); }, { passive: true });
   resize();
   // The film grain lives in the hero canvas: stars wait for it, then both fade in together.
   window.addEventListener('hero-ready', function () {
