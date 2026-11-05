@@ -142,26 +142,25 @@ export async function initHero(canvas) {
   }
 
   // ---------- Name + tagline ----------
-  // Rendered with an orthographic camera and an oblique shear so it matches the old flat
-  // artwork (assets/HERO_SAPPHIRE.png): letters face-on, extrusion receding up and to the right.
+  // Same size and placement as the old flat artwork (assets/HERO_SAPPHIRE.png), seen by a
+  // perspective camera centred on the name: every letter extrudes straight back toward one
+  // vanishing point, so walls only show on the inner sides (never past the outer letters).
   // Everything below is laid out in that artwork's pixel space (2707 × 386).
   const ART_W = 2707, ART_H = 386;
   const ART = {
     title: { x0: 1, x1: 2705, y0: 1, y1: 234 },     // white letter faces in the artwork
     tagline: { x0: 543, x1: 2143, y0: 282, y1: 383 }
   };
-  const DEPTH_ART = 260;                    // ≥ title cap height (233) — words are deeper than tall
-  const SHEAR = { x: 68 / DEPTH_ART, y: 9 / DEPTH_ART }; // the artwork's extrusion offset: 68px right, 9px up
+  const DEPTH_ART = 1400;                   // ~6× the title's cap height (233): a long run back
+  const TEXT_FOV = 34;
 
   const font = new FontLoader().parse(fontJson);
   const textScene = new THREE.Scene();
   textScene.environment = scene.environment;
   addLights(textScene);
   const text = new THREE.Group();
-  text.matrixAutoUpdate = false;
-  textScene.add(text);
-  const textCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 6000);
-  textCamera.position.z = 3000;
+    textScene.add(text);
+  const textCamera = new THREE.PerspectiveCamera(TEXT_FOV, 1, 10, 20000);
 
   const SIZE = 100;
   const capMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.72, roughness: 0.5, metalness: 0 });
@@ -183,6 +182,11 @@ export async function initHero(canvas) {
     return b;
   }
 
+  // The artwork's letters are a little heavier and ~13% wider than Roboto Black Italic's
+  // natural shape: grow the outline slightly (bevelOffset) and stretch horizontally.
+  const EMBOLDEN = 2.2;   // font units at SIZE 100
+  const STRETCH_X = 1.13;
+
   // Fit a line of text into a box of the artwork: height sets the scale,
   // and letter-spacing is solved so the width matches too.
   function buildLine(str, box) {
@@ -190,11 +194,13 @@ export async function initHero(canvas) {
     const adv = chars.map((ch) => (font.data.glyphs[ch].ha / font.data.resolution) * SIZE);
     const boxes = chars.map((ch) => (ch === ' ' ? null : glyphBox(ch)));
     const ink = boxes.filter(Boolean);
-    const yMin = Math.min(...ink.map((b) => b.min.y)), yMax = Math.max(...ink.map((b) => b.max.y));
+    const E = EMBOLDEN;
+    const yMin = Math.min(...ink.map((b) => b.min.y)) - E, yMax = Math.max(...ink.map((b) => b.max.y)) + E;
     const k = (box.y1 - box.y0) / (yMax - yMin);
+    const kx = k * STRETCH_X;
     const lastAdv = adv.slice(0, -1).reduce((a, c) => a + c, 0);
-    const w0 = lastAdv + boxes[boxes.length - 1].max.x - boxes[0].min.x;
-    const extra = ((box.x1 - box.x0) / k - w0) / (chars.length - 1);
+    const w0 = lastAdv + (boxes[boxes.length - 1].max.x + E) - (boxes[0].min.x - E);
+    const extra = ((box.x1 - box.x0) / kx - w0) / (chars.length - 1);
 
     const depth = DEPTH_ART / k;
     const line = new THREE.Group();
@@ -204,7 +210,7 @@ export async function initHero(canvas) {
       if (ch !== ' ') {
         const geo = new TextGeometry(ch, {
           font, size: SIZE, depth, curveSegments: 2,
-          bevelEnabled: true, bevelThickness: 1.6, bevelSize: 1.1, bevelSegments: 3
+          bevelEnabled: true, bevelThickness: 1.6, bevelSize: 0.8, bevelOffset: EMBOLDEN, bevelSegments: 3
         });
         geo.translate(0, 0, -depth); // front face at z = 0, extrusion goes back
         const m = new THREE.Mesh(geo, [capMat, wallMat]);
@@ -214,9 +220,9 @@ export async function initHero(canvas) {
       }
       x += adv[i] + extra;
     });
-    line.scale.setScalar(k);
+    line.scale.set(kx, k, k);
     // artwork pixel space (y down) → group space centred on the artwork (y up)
-    line.position.set(box.x0 - ART_W / 2 - k * boxes[0].min.x, (ART_H / 2 - box.y1) - k * yMin, 0);
+    line.position.set(box.x0 - ART_W / 2 - kx * (boxes[0].min.x - E), (ART_H / 2 - box.y1) - k * yMin, 0);
     return { line, meshes, depth };
   }
 
@@ -236,26 +242,19 @@ export async function initHero(canvas) {
         v.fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld);
         gradientAt((v.x + ART_W / 2) / ART_W, tmp);
         const back = Math.min(1, Math.max(0, -p.getZ(i) / depth));
-        tmp.multiplyScalar(1 - back * 0.35);
+        tmp.multiplyScalar(1 - back * 0.55);
         col[i * 3] = tmp.r; col[i * 3 + 1] = tmp.g; col[i * 3 + 2] = tmp.b;
       }
       m.geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
     }
   }
 
-  // text transform = translate · oblique shear · scale
-  const textPos = new THREE.Vector3(), textScale = new THREE.Matrix4(), shearM = new THREE.Matrix4(), tMat = new THREE.Matrix4();
-  let textK = 1;
-  function setTextMatrix(kx, ky) {
-    shearM.set(
-      1, 0, -kx, 0,
-      0, 1, -ky, 0,
-      0, 0, 1, 0,
-      0, 0, 0, 1
-    );
-    tMat.makeTranslation(textPos.x, textPos.y, 0).multiply(shearM).multiply(textScale.makeScale(textK, textK, textK));
-    text.matrix.copy(tMat);
-    text.matrixWorldNeedsUpdate = true;
+  // Front faces stay pinned at 1 world unit = 1 CSS px; the camera can drift (pointer/idle)
+  // to move the vanishing point while setViewOffset keeps the front faces exactly in place.
+  let textCenterY = 0, textDist = 1;
+  function placeTextCamera(dx, dy) {
+    textCamera.position.set(dx, textCenterY + dy, textDist);
+    textCamera.setViewOffset(vw, vh, -dx, textCenterY + dy, vw, vh);
   }
 
   // ---------- Layout ----------
@@ -286,11 +285,15 @@ export async function initHero(canvas) {
 
     // text: same box as the old <img class="hero-transparent">: 80% wide (max 1440px),
     // centred horizontally, vertically centred at 45% of the hero (top: -10%; bottom: 0)
-    textCamera.left = -vw / 2; textCamera.right = vw / 2;
-    textCamera.top = vh / 2; textCamera.bottom = -vh / 2;
-    textCamera.updateProjectionMatrix();
-    textK = Math.min(vw * 0.8, 1440) / ART_W;
-    textPos.set(0, vh / 2 - vh * 0.45, 0);
+    const textK = Math.min(vw * 0.8, 1440) / ART_W;
+    text.scale.setScalar(textK);
+    text.position.set(0, vh / 2 - vh * 0.45, 0);
+    // vanishing point = centre of the name + tagline block
+    textCenterY = text.position.y;
+    textCamera.aspect = vw / vh;
+    textDist = (vh / 2) / Math.tan(THREE.MathUtils.degToRad(TEXT_FOV / 2));
+    textCamera.far = textDist + DEPTH_ART * textK * 2 + 1000;
+    placeTextCamera(0, 0);
   }
 
   // ---------- Interaction / animation ----------
@@ -306,10 +309,10 @@ export async function initHero(canvas) {
     const t = reduceMotion ? 0 : clock.getElapsedTime();
     eased.lerp(pointer, 0.05);
 
-    // oblique extrusion like the artwork; the pointer nudges the "camera" a little
-    setTextMatrix(
-      SHEAR.x + eased.x * 0.06 + Math.sin(t * 0.35) * 0.012,
-      SHEAR.y - eased.y * 0.05 + Math.sin(t * 0.27) * 0.008
+    // the pointer (and a slow idle drift) nudges the vanishing point a little
+    placeTextCamera(
+      eased.x * vw * 0.06 + Math.sin(t * 0.35) * vw * 0.01,
+      -eased.y * vh * 0.06 + Math.sin(t * 0.27) * vh * 0.01
     );
 
     for (const b of blobs) {
