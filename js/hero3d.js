@@ -1,5 +1,7 @@
 // Hero: 3D globules + extruded name/tagline.
 // Globules: see js/lava.js (raymarched lava lamp seeded with the old wallpaper's shapes).
+// Draw order: globules → extrusion walls → film grain → white letter faces, so grain covers
+// everything except the faces.
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
@@ -22,6 +24,47 @@ function gradientAt(t, out) {
 }
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Dynamic film grain over the transparent canvas (so over the stars behind it too). One noise
+// tile; ~24 times a second it jumps to a random offset, so the grain "boils" like film.
+function createGrain(renderer) {
+  const TILE = 512, STRENGTH = 0.13, FPS = 24;
+  const data = new Uint8Array(TILE * TILE * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    const g = Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()); // ~N(0,1)
+    const a = Math.min(1, Math.abs(g) * 70 / 255) * STRENGTH;
+    data[i] = data[i + 1] = data[i + 2] = g > 0 ? a * 255 : 0;   // light and dark specks (premultiplied)
+    data[i + 3] = a * 255;
+  }
+  const tile = new THREE.DataTexture(data, TILE, TILE, THREE.RGBAFormat);
+  tile.wrapS = tile.wrapT = THREE.RepeatWrapping;
+  tile.minFilter = tile.magFilter = THREE.NearestFilter;
+  tile.needsUpdate = true;
+
+  const uniforms = { uTile: { value: tile }, uOffset: { value: new THREE.Vector2() }, uScale: { value: 1 } };
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    vertexShader: 'in vec3 position; void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: `precision highp float;
+      uniform sampler2D uTile; uniform vec2 uOffset; uniform float uScale;
+      out vec4 outColor;
+      void main() { outColor = texture(uTile, gl_FragCoord.xy * uScale + uOffset); }`,
+    uniforms, transparent: true, depthTest: false, depthWrite: false,
+    blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor
+  }));
+  quad.frustumCulled = false;
+  const scene = new THREE.Scene(); scene.add(quad);
+  const cam = new THREE.Camera();
+  let last = -Infinity;
+  return {
+    render(now) {
+      if (now - last >= 1000 / FPS) { last = now; uniforms.uOffset.value.set(Math.random(), Math.random()); }
+      uniforms.uScale.value = 1 / (renderer.getPixelRatio() * TILE);   // 1 grain per CSS pixel
+      renderer.render(scene, cam);
+    }
+  };
+}
 
 export async function initHero(canvas, hero) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -54,7 +97,7 @@ export async function initHero(canvas, hero) {
   // ---------- Name + tagline ----------
   // Same size and placement as the old flat artwork (assets/HERO_SAPPHIRE.png), seen by a
   // perspective camera centred on the name: every letter extrudes straight back toward one
-  // vanishing point, so walls only show on the inner sides (never past the outer letters).
+  // fixed vanishing point, so walls only show on the inner sides (never past the outer letters).
   // Everything below is laid out in that artwork's pixel space (2707 × 386).
   const ART_W = 2707, ART_H = 386;
   const ART = {
@@ -73,7 +116,7 @@ export async function initHero(canvas, hero) {
   const textCamera = new THREE.PerspectiveCamera(TEXT_FOV, 1, 10, 20000);
 
   const SIZE = 100;
-  const capMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.72, roughness: 0.5, metalness: 0 });
+  const capMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
   // walls: mostly self-lit gradient with only a little diffuse shading, so they stay as saturated as the artwork
   const wallMat = new THREE.MeshStandardMaterial({ vertexColors: true, color: 0x3a3a3a, roughness: 0.9, metalness: 0, envMapIntensity: 0.0 });
   wallMat.onBeforeCompile = (shader) => {
@@ -93,7 +136,8 @@ export async function initHero(canvas, hero) {
   }
 
   // The artwork's letters are a little heavier and ~13% wider than Roboto Black Italic's
-  // natural shape: grow the outline slightly (bevelOffset) and stretch horizontally.
+  // natural shape: grow the outline slightly (bevelOffset, no actual bevel: a bevel would make
+  // the walls wider than the face, leaving a coloured outline) and stretch horizontally.
   const EMBOLDEN = 2.2;   // font units at SIZE 100
   const STRETCH_X = 1.13;
 
@@ -120,7 +164,7 @@ export async function initHero(canvas, hero) {
       if (ch !== ' ') {
         const geo = new TextGeometry(ch, {
           font, size: SIZE, depth, curveSegments: 2,
-          bevelEnabled: true, bevelThickness: 1.6, bevelSize: 0.8, bevelOffset: EMBOLDEN, bevelSegments: 3
+          bevelEnabled: true, bevelThickness: 0, bevelSize: 0, bevelOffset: EMBOLDEN, bevelSegments: 1
         });
         geo.translate(0, 0, -depth); // front face at z = 0, extrusion goes back
         const m = new THREE.Mesh(geo, [capMat, wallMat]);
@@ -159,13 +203,8 @@ export async function initHero(canvas, hero) {
     }
   }
 
-  // Front faces stay pinned at 1 world unit = 1 CSS px; the camera can drift (pointer/idle)
-  // to move the vanishing point while setViewOffset keeps the front faces exactly in place.
+  // Front faces are pinned at 1 world unit = 1 CSS px.
   let textCenterY = 0, textDist = 1, textK = 1;
-  function placeTextCamera(dx, dy) {
-    textCamera.position.set(dx, textCenterY + dy, textDist);
-    textCamera.setViewOffset(vw, vh, -dx, textCenterY + dy, vw, vh);
-  }
 
   // ---------- Layout ----------
   let vw = 1, vh = 1;
@@ -185,7 +224,8 @@ export async function initHero(canvas, hero) {
     textCamera.aspect = vw / vh;
     textDist = (vh / 2) / Math.tan(THREE.MathUtils.degToRad(TEXT_FOV / 2));
     textCamera.far = textDist + DEPTH_ART * textK * 2 + 1000;
-    placeTextCamera(0, 0);
+    textCamera.position.set(0, textCenterY, textDist);
+    textCamera.setViewOffset(vw, vh, 0, textCenterY, vw, vh);
   }
 
   // ---------- Interaction / animation ----------
@@ -199,6 +239,7 @@ export async function initHero(canvas, hero) {
     pointer.set((e.clientX / window.innerWidth) * 2 - 1, (e.clientY / window.innerHeight) * 2 - 1);
   }, { passive: true });
 
+  const grain = createGrain(renderer);
   const clock = new THREE.Clock();
   // ?lavaSpeed=8 fast-forwards the animation (handy for previewing the lava lamp); ?debug exposes it
   const params = new URLSearchParams(location.search);
@@ -220,10 +261,6 @@ export async function initHero(canvas, hero) {
     text.position.y = textCenterY + scrollOffset;
     text.scale.z = textK * (1 - 0.88 * smooth(0, 1.1, sv));
     text.visible = sv < 1.6;
-    placeTextCamera(
-      eased.x * vw * 0.06 + Math.sin(t * 0.35) * vw * 0.01,
-      -eased.y * vh * 0.06 + Math.sin(t * 0.27) * vh * 0.01
-    );
 
     // ---- globules: lava lamp (js/lava.js); scrolling lifts it at 0.35× ----
     const now = performance.now(), frameMs = now - lastFrame; lastFrame = now;
@@ -236,6 +273,12 @@ export async function initHero(canvas, hero) {
     lava.render();
     if (text.visible) {
       renderer.clearDepth();
+      capMat.visible = false; wallMat.visible = true;
+      renderer.render(textScene, textCamera);
+    }
+    grain.render(now);
+    if (text.visible) {
+      capMat.visible = true; wallMat.visible = false;
       renderer.render(textScene, textCamera);
     }
   }
@@ -252,5 +295,6 @@ export async function initHero(canvas, hero) {
   frame();
   if (!reduceMotion) requestAnimationFrame(loop);
   canvas.classList.add('is-ready');
+  window.dispatchEvent(new Event('hero-ready'));
   return { renderer, scene };
 }
