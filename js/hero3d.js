@@ -1,13 +1,12 @@
 // Hero: 3D globules + extruded name/tagline.
-// Globules are extracted from the old wallpaper (assets/reigonalpha6.jpg):
-// each one ships as a colour texture + a 16-bit height map (R = hi byte, G = lo byte)
-// that is inflated into a closed, pillow-shaped mesh here.
+// Globules are extracted from the old wallpaper (assets/reigonalpha6.jpg) and rebuilt
+// offline as closed 3D blobs (see loadBlobGeometry).
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
 
-const BASE = new URL('../assets/hero3d/', import.meta.url);
+export const BASE = new URL('../assets/hero3d/', import.meta.url);
 
 // Gradient sampled from the extrusion "shadow" in assets/HERO_SAPPHIRE.png (left → right).
 const GRADIENT = [
@@ -22,6 +21,45 @@ function gradientAt(t, out) {
 }
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Matte: no clearcoat / reflections, just soft diffuse shading over the original colours.
+export function blobMaterial(map) {
+  return new THREE.MeshStandardMaterial({
+    map,
+    emissiveMap: map,
+    emissive: 0xffffff,
+    emissiveIntensity: 0.3,
+    roughness: 1.0,
+    metalness: 0.0,
+    envMapIntensity: 0.0
+  });
+}
+
+// Globules are closed, watertight meshes built offline (marching cubes over an inflated,
+// completed silhouette). Binary: uint16 xyz quantised to meta.min..max, then the indices.
+export async function loadBlobGeometry(meta) {
+  const buf = await fetch(new URL(`blob_${meta.name}.bin`, BASE)).then((r) => r.arrayBuffer());
+  const n = meta.vertexCount;
+  const q = new Uint16Array(buf, 0, n * 3);
+  const pos = new Float32Array(n * 3);
+  const uv = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    for (let a = 0; a < 3; a++) pos[i * 3 + a] = meta.min[a] + (q[i * 3 + a] / 65535) * (meta.max[a] - meta.min[a]);
+    // planar projection of the wallpaper colours (front-on), bbox-centred
+    uv[i * 2] = pos[i * 3] / meta.w + 0.5;
+    uv[i * 2 + 1] = pos[i * 3 + 1] / meta.h + 0.5;
+  }
+  const idxOffset = n * 3 * 2;
+  const index = meta.index32
+    ? new Uint32Array(buf, idxOffset, meta.indexCount)
+    : new Uint16Array(buf, idxOffset, meta.indexCount);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(new THREE.BufferAttribute(index, 1));
+  geo.computeVertexNormals();
+  return geo;
+}
 
 export async function initHero(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -58,87 +96,17 @@ export async function initHero(canvas) {
   blobs.forEach((b) => scene.add(b.pivot));
 
   async function buildBlob(meta, index) {
-    const [map, heights] = await Promise.all([
+    const [map, geo] = await Promise.all([
       texLoader.loadAsync(new URL(`blob_${meta.name}.webp`, BASE).href),
-      loadHeights(new URL(`height_${meta.name}.png`, BASE).href)
+      loadBlobGeometry(meta)
     ]);
     map.colorSpace = THREE.SRGBColorSpace;
     map.anisotropy = 4;
-
-    const geo = inflate(heights, meta);
-    // matte: no clearcoat / reflections, just soft diffuse shading over the original colours
-    const mat = new THREE.MeshStandardMaterial({
-      map,
-      emissiveMap: map,
-      emissive: 0xffffff,
-      emissiveIntensity: 0.3,
-      roughness: 1.0,
-      metalness: 0.0,
-      envMapIntensity: 0.0,
-      alphaTest: 0.6,
-      side: THREE.FrontSide
-    });
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = new THREE.Mesh(geo, blobMaterial(map));
     // geometry is centred on the blob's bbox centre; the pivot moves it into place
     const pivot = new THREE.Group();
     pivot.add(mesh);
     return { meta, pivot, mesh, phase: index * 1.7 + 0.4 };
-  }
-
-  function loadHeights(url) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        const c = document.createElement('canvas');
-        c.width = img.width; c.height = img.height;
-        const ctx = c.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0);
-        const d = ctx.getImageData(0, 0, c.width, c.height).data;
-        const h = new Float32Array(c.width * c.height);
-        for (let i = 0; i < h.length; i++) h[i] = (d[i * 4] * 256 + d[i * 4 + 1]) / 65535;
-        resolve({ w: c.width, h: c.height, data: h });
-      };
-      img.onerror = reject;
-      img.src = url;
-    });
-  }
-
-  // Front + mirrored back sheet that meet at z = 0 on the silhouette → closed pillow.
-  function inflate(hm, meta) {
-    const { w: gw, h: gh, data } = hm;
-    const sx = meta.w / (gw - 1), sy = meta.h / (gh - 1);
-    const depth = Math.min(meta.depth, Math.max(meta.w, meta.h) * 0.22) * 0.75;
-    const n = gw * gh;
-    const pos = new Float32Array(n * 2 * 3);
-    const uv = new Float32Array(n * 2 * 2);
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        const i = y * gw + x;
-        const px = x * sx - meta.w / 2;
-        const py = meta.h / 2 - y * sy;
-        const z = data[i] * depth;
-        pos.set([px, py, z], i * 3);
-        pos.set([px, py, -z], (i + n) * 3);
-        uv.set([x / (gw - 1), 1 - y / (gh - 1)], i * 2);
-        uv.set([x / (gw - 1), 1 - y / (gh - 1)], (i + n) * 2);
-      }
-    }
-    const idx = [];
-    const inside = (i) => data[i] > 0;
-    for (let y = 0; y < gh - 1; y++) {
-      for (let x = 0; x < gw - 1; x++) {
-        const a = y * gw + x, b = a + 1, c = a + gw, d = c + 1;
-        if (!(inside(a) || inside(b) || inside(c) || inside(d))) continue;
-        idx.push(a, c, b, b, c, d); // front (CCW toward +z)
-        idx.push(a + n, b + n, c + n, b + n, d + n, c + n); // back
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-    return geo;
   }
 
   // ---------- Name + tagline ----------
@@ -298,6 +266,11 @@ export async function initHero(canvas) {
 
   // ---------- Interaction / animation ----------
   const pointer = new THREE.Vector2(0, 0), eased = new THREE.Vector2(0, 0);
+  // Scrolling: the name keeps facing the viewer, but the vanishing point stays put on the
+  // screen while the hero scrolls away, so more of the rear extrusion is revealed.
+  let scrollOffset = 0;
+  const readScroll = () => { scrollOffset = Math.max(0, -canvas.getBoundingClientRect().top); };
+  window.addEventListener('scroll', () => { readScroll(); if (reduceMotion) frame(); }, { passive: true });
   window.addEventListener('pointermove', (e) => {
     pointer.set((e.clientX / window.innerWidth) * 2 - 1, (e.clientY / window.innerHeight) * 2 - 1);
   }, { passive: true });
@@ -309,10 +282,11 @@ export async function initHero(canvas) {
     const t = reduceMotion ? 0 : clock.getElapsedTime();
     eased.lerp(pointer, 0.05);
 
-    // the pointer (and a slow idle drift) nudges the vanishing point a little
+    // the pointer (and a slow idle drift) nudges the vanishing point a little;
+    // scrolling holds it in place on screen (the hero moves up, the VP doesn't)
     placeTextCamera(
       eased.x * vw * 0.06 + Math.sin(t * 0.35) * vw * 0.01,
-      -eased.y * vh * 0.06 + Math.sin(t * 0.27) * vh * 0.01
+      -eased.y * vh * 0.06 + Math.sin(t * 0.27) * vh * 0.01 - scrollOffset
     );
 
     for (const b of blobs) {
@@ -353,6 +327,7 @@ export async function initHero(canvas) {
 
   new ResizeObserver(() => { layout(); frame(); }).observe(canvas.parentElement);
   layout();
+  readScroll();
   frame();
   start();
   canvas.classList.add('is-ready');
