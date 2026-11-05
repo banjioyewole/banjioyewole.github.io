@@ -9,7 +9,6 @@ body.space { background: transparent; margin: 0; }
   height: 100vh;
   z-index: -3;
   pointer-events: none;
-  filter: blur(0.6px); /* photographic softness, as in the original long-exposure wallpaper */
   opacity: 0; /* hidden until the hero canvas (which draws the grain) is ready; same fade */
   transition: opacity 0.9s ease;
 }

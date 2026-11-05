@@ -2,7 +2,6 @@
 // assets/reigonalpha6.jpg. Numbers below were measured from that image: streaks sit 12.5° off
 // vertical, the bright end is always at the top, and brightness and width fall off from a wide
 // head into a hair-thin tail. Stars travel head-first: up and slightly to the right.
-// The canvas is softened with a CSS blur (css/hero3d.css) so it reads as a photo, not as vector lines.
 (function () {
   var canvas = document.getElementById('starfield');
   if (!canvas || !canvas.getContext) return;
@@ -24,8 +23,11 @@
   ];
   var VARIANTS = 10; // sprites per tier; every frame just stamps these, so 1000+ stars stay cheap
   var HALO_BLUE = '20, 90, 255';
+  var WARM_SHARE = 0.015; // a rare few stars burn a slightly warmer white
+  var WARM_COLORS = ['#ffe9cf', '#ffe2c0', '#ffeedb'];
+  var WARM_HALO = '255, 212, 165', WARM_CORE = '255, 246, 232';
 
-  var w = 0, h = 0, dpr = 1, scale = 1, stars = [], sprites = [];
+  var w = 0, h = 0, dpr = 1, scale = 1, stars = [], sprites = [], warmSprites = [];
 
   function rand(a, b) { return a + Math.random() * (b - a); }
   function pick(list) { return list[(Math.random() * list.length) | 0]; }
@@ -40,11 +42,12 @@
     c.closePath();
   }
 
-  function makeSprite(tier) {
+  function makeSprite(tier, warm) {
     var len = rand(tier.len[0], tier.len[1]) * scale;
     var headW = tier.headW * scale, tailW = tier.tailW * scale, halo = tier.halo * scale;
     var alpha = rand(tier.alpha[0], tier.alpha[1]);
-    var color = pick(tier.colors);
+    var color = pick(warm ? WARM_COLORS : tier.colors);
+    var haloColor = warm ? WARM_HALO : HALO_BLUE, coreColor = warm ? WARM_CORE : '235, 248, 255';
     var pad = Math.ceil(Math.max(halo, headW) + 3);
     var sw = Math.ceil(len * DX + pad * 2 + 2), sh = Math.ceil(len + pad * 2 + 2);
 
@@ -60,14 +63,14 @@
 
     if (halo > 0) { // bloom: strongest round the head, a fainter sheath down the first part of the tail
       var bloom = g.createRadialGradient(0, 0, 0, 0, 0, halo);
-      bloom.addColorStop(0, 'rgba(' + HALO_BLUE + ',' + 0.5 * alpha + ')');
-      bloom.addColorStop(0.45, 'rgba(' + HALO_BLUE + ',' + 0.22 * alpha + ')');
-      bloom.addColorStop(1, 'rgba(' + HALO_BLUE + ',0)');
+      bloom.addColorStop(0, 'rgba(' + haloColor + ',' + 0.5 * alpha + ')');
+      bloom.addColorStop(0.45, 'rgba(' + haloColor + ',' + 0.22 * alpha + ')');
+      bloom.addColorStop(1, 'rgba(' + haloColor + ',0)');
       g.fillStyle = bloom;
       g.beginPath(); g.arc(0, 0, halo, 0, Math.PI * 2); g.fill();
       var sheath = g.createLinearGradient(0, 0, 0, len * 0.65);
-      sheath.addColorStop(0, 'rgba(' + HALO_BLUE + ',' + 0.3 * alpha + ')');
-      sheath.addColorStop(1, 'rgba(' + HALO_BLUE + ',0)');
+      sheath.addColorStop(0, 'rgba(' + haloColor + ',' + 0.3 * alpha + ')');
+      sheath.addColorStop(1, 'rgba(' + haloColor + ',0)');
       g.fillStyle = sheath;
       teardrop(g, headW * 1.7, tailW, len * 0.65);
       g.fill();
@@ -85,8 +88,8 @@
 
     if (tier.core > 0) { // near-white hot core inside the head
       var hot = g.createLinearGradient(0, 0, 0, len * 0.45);
-      hot.addColorStop(0, 'rgba(235, 248, 255,' + tier.core + ')');
-      hot.addColorStop(1, 'rgba(235, 248, 255,0)');
+      hot.addColorStop(0, 'rgba(' + coreColor + ',' + tier.core + ')');
+      hot.addColorStop(1, 'rgba(' + coreColor + ',0)');
       g.fillStyle = hot;
       teardrop(g, headW * 0.6, tailW * 0.6, len * 0.45);
       g.fill();
@@ -97,7 +100,7 @@
   function makeStar(x, y) {
     var r = Math.random(), i = 0;
     while (i < TIERS.length - 1 && r > TIERS[i].share) { r -= TIERS[i].share; i++; }
-    var s = pick(sprites[i]);
+    var s = pick(Math.random() < WARM_SHARE ? warmSprites[i] : sprites[i]);
     return { x: x, y: y, sprite: s, speed: s.len * rand(0.9, 1.6) * SPEED }; // px/s; longer streaks move faster
   }
 
@@ -114,6 +117,11 @@
     sprites = TIERS.map(function (tier) {
       var list = [];
       for (var v = 0; v < VARIANTS; v++) list.push(makeSprite(tier));
+      return list;
+    });
+    warmSprites = TIERS.map(function (tier) {
+      var list = [];
+      for (var v = 0; v < 3; v++) list.push(makeSprite(tier, true));
       return list;
     });
     var target = Math.round((w * h) / (620 * scale * scale));
