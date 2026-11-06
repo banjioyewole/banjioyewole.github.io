@@ -1,12 +1,12 @@
 // Hero: 3D globules + extruded name/tagline.
-// Globules: see js/lava.js (raymarched lava lamp seeded with the old wallpaper's shapes).
+// Globules: see js/blobs.js (the old wallpaper's shapes, floating up as the page scrolls).
 // Draw order: stars → globules → extrusion walls → film grain → white letter faces, so grain
 // covers everything except the faces.
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
-import { createLava } from './lava.js';
+import { createBlobs } from './blobs.js';
 import { createStars } from './stars.js';
 
 export const BASE = new URL('../assets/hero3d/', import.meta.url);
@@ -133,8 +133,8 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
   addLights(scene);
   renderer.autoClear = false;
 
-  const [lava, fontJson] = await Promise.all([
-    createLava(renderer, BASE, { reduceMotion }),
+  const [blobs, fontJson] = await Promise.all([
+    createBlobs(renderer, BASE),
     fetch(new URL('roboto_black_italic.subset.json', BASE)).then((r) => r.json())
   ]);
 
@@ -256,7 +256,7 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
     // the canvas is fixed to the viewport: globules stay behind the whole site
     vw = Math.max(1, canvas.clientWidth); vh = Math.max(1, canvas.clientHeight);
     renderer.setSize(vw, vh, false);
-    lava.layout(vw, vh, renderer.getPixelRatio());
+    blobs.layout(vw, vh, renderer.getPixelRatio());
     stars.layout(vw, vh, renderer.getPixelRatio());
 
     // text: same box as the old <img class="hero-transparent">: 80% wide (max 1440px),
@@ -274,7 +274,6 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
   }
 
   // ---------- Interaction / animation ----------
-  const pointer = new THREE.Vector2(0, 0), eased = new THREE.Vector2(0, 0);
   // Scrolling: the name keeps facing the viewer, but the vanishing point stays put on the
   // screen while the hero scrolls away, so more of the rear extrusion is revealed.
   let scrollOffset = 0;
@@ -282,24 +281,14 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
   let running = false;
   window.addEventListener('scroll', () => { readScroll(); if (reduceMotion && running) frame(); },
     { passive: true, signal: listeners.signal });
-  window.addEventListener('pointermove', (e) => {
-    pointer.set((e.clientX / window.innerWidth) * 2 - 1, (e.clientY / window.innerHeight) * 2 - 1);
-  }, { passive: true, signal: listeners.signal });
 
   const grain = createGrain(renderer);
   const stars = createStars(renderer);
   const clock = new THREE.Clock();
-  // ?lavaSpeed=8 fast-forwards the animation (handy for previewing the lava lamp); ?debug exposes it
-  const params = new URLSearchParams(location.search);
-  const TIME_SCALE = Number(params.get('lavaSpeed')) || 1;
-  if (params.has('debug')) window.__lava = lava;
-  let lastT = 0, lastScroll = 0, lastFrame = performance.now();
-
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
   function frame() {
-    const t = reduceMotion ? 0 : clock.getElapsedTime() * TIME_SCALE;
-    eased.lerp(pointer, 0.05);
+    const t = reduceMotion ? 0 : clock.getElapsedTime();
 
     // ---- name: scrolls away with the hero, always face-on ----
     // The vanishing point stays fixed on screen, so scrolling reveals the underside of the
@@ -310,22 +299,16 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
     text.scale.z = textK * (1 - 0.88 * smooth(0, 1.1, sv));
     text.visible = sv < 1.6;
 
-    // ---- globules: lava lamp (js/lava.js); scrolling lifts it at 0.35× ----
-    const now = performance.now(), frameMs = now - lastFrame; lastFrame = now;
-    const dt = Math.max(0, t - lastT); lastT = t;
-    lava.update(dt, scrollOffset - lastScroll, eased, frameMs);
-    lastScroll = scrollOffset;
-
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
     stars.render(t);
-    lava.render();
+    blobs.render(scrollOffset);
     if (text.visible) {
       renderer.clearDepth();
       capMat.visible = false; wallMat.visible = true;
       renderer.render(textScene, textCamera);
     }
-    grain.render(now);
+    grain.render(performance.now());
     if (text.visible) {
       capMat.visible = true; wallMat.visible = false;
       renderer.render(textScene, textCamera);
@@ -357,12 +340,11 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
 
   layout();
   readScroll();
-  lastScroll = scrollOffset;
 
   // Compile in the background with a time limit, so a weak GPU can't hold the page up for minutes.
   // The clock starts here, once the assets are in: a slow network says nothing about the device.
   const compileStart = performance.now();
-  const compiled = Promise.all([lava.compile(), stars.compile(), renderer.compileAsync(textScene, textCamera), grain.compile()]);
+  const compiled = Promise.all([blobs.compile(), stars.compile(), renderer.compileAsync(textScene, textCamera), grain.compile()]);
   const limit = new Promise((resolve) => setTimeout(() => resolve('timeout'), COMPILE_BUDGET_MS));
   if (await (force ? compiled : Promise.race([compiled, limit])) === 'timeout') giveUp('compile-timeout');
   if (stopped) return;
