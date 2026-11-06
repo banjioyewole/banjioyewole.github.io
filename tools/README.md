@@ -2,7 +2,7 @@
 
 - `make_blobs.py` — extracts the four globules from `assets/reigonalpha6.jpg`, completes the
   silhouettes cropped by the frame and writes the baked signed-distance atlas
-  (`assets/hero3d/sdf_atlas.png`), colour textures and `blobs.json` used by `js/lava.js`.
+  (`assets/hero3d/sdf_atlas.png`), colour textures and `blobs.json` used by `js/blobs.js`.
   Needs numpy, scipy, opencv-python, pillow.
 - `make_font.py OUT.json Roboto-Italic[wdth,wght].ttf` — builds the Roboto Black Italic
   subset (overlaps merged) used for the 3D name. Needs fonttools, opencv-python, numpy.
