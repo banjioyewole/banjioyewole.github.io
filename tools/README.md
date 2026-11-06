@@ -4,5 +4,6 @@
   silhouettes cropped by the frame and writes the baked signed-distance atlas
   (`assets/hero3d/sdf_atlas.png`), colour textures and `blobs.json` used by `js/blobs.js`.
   Needs numpy, scipy, opencv-python, pillow.
-- `make_font.py OUT.json Roboto-Italic[wdth,wght].ttf` — builds the Roboto Black Italic
-  subset (overlaps merged) used for the 3D name. Needs fonttools, opencv-python, numpy.
+- `make_font.py OUT.json [FONT.otf]` — builds the letter shapes for the 3D name
+  (`assets/hero3d/sf_compact_hero.json`) from an installed SF Compact Text Heavy Italic.
+  Needs fonttools, uharfbuzz, opencv-python, numpy.

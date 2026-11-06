@@ -135,7 +135,7 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
 
   const [blobs, fontJson] = await Promise.all([
     createBlobs(renderer, BASE),
-    fetch(new URL('roboto_black_italic.subset.json', BASE)).then((r) => r.json())
+    fetch(new URL('sf_compact_hero.json', BASE)).then((r) => r.json())
   ]);
 
   // ---------- Name + tagline ----------
@@ -179,17 +179,18 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
     return b;
   }
 
-  // The artwork's letters are a little heavier and ~13% wider than Roboto Black Italic's
-  // natural shape: grow the outline slightly (bevelOffset, no actual bevel: a bevel would make
-  // the walls wider than the face, leaving a coloured outline) and stretch horizontally.
-  const EMBOLDEN = 2.2;   // font units at SIZE 100
-  const STRETCH_X = 1.13;
+  // Knobs for matching the artwork: grow the outline (bevelOffset, no actual bevel: a bevel would
+  // make the walls wider than the face, leaving a coloured outline) and stretch horizontally.
+  const EMBOLDEN = 0;   // font units at SIZE 100
+  const STRETCH_X = 1.01;
 
   // Fit a line of text into a box of the artwork: height sets the scale,
   // and letter-spacing is solved so the width matches too.
   function buildLine(str, box) {
     const chars = Array.from(str);
-    const adv = chars.map((ch) => (font.data.glyphs[ch].ha / font.data.resolution) * SIZE);
+    const toSize = (units) => (units / font.data.resolution) * SIZE;
+    // each letter's advance, plus the font's kerning with the letter after it (O–Y is the big one)
+    const adv = chars.map((ch, i) => toSize(font.data.glyphs[ch].ha + (font.data.kern[ch + chars[i + 1]] || 0)));
     const boxes = chars.map((ch) => (ch === ' ' ? null : glyphBox(ch)));
     const ink = boxes.filter(Boolean);
     const E = EMBOLDEN;
