@@ -1,11 +1,11 @@
 // Hero: 3D globules + extruded name/tagline.
 // Globules: see js/blobs.js (the old wallpaper's shapes, floating up as the page scrolls).
-// Draw order: stars → globules → extrusion walls → film grain → white letter faces, so grain
-// covers everything except the faces.
+// Two canvases. The fixed one behind the page draws stars → globules → film grain. The name has its
+// own, inside the hero, so iOS moves it with the HTML instead of it waiting for scroll events; it
+// draws walls → film grain → white letter faces, so grain covers everything except the faces.
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
-import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
 import { createBlobs } from './blobs.js';
 import { createStars } from './stars.js';
 
@@ -25,14 +25,15 @@ function gradientAt(t, out) {
 }
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const GRAIN_FPS = 24;
 
 // Dynamic film grain. One noise tile; ~24 times a second it jumps to a random offset, so the
 // grain "boils" like film. Two blends, so it never greys the colours:
 //  • over anything already drawn (globules, extrusion walls): multiply, which only changes
 //    brightness, keeping hue and saturation, and leaves black alone
 //  • where the canvas is still empty (the sky): a faint light/dark speckle
-function createGrain(renderer) {
-  const TILE = 512, MULTIPLY = 0.035, SKY = 0.1, FPS = 24;
+function createGrain(renderer, { sky }) {
+  const TILE = 512, MULTIPLY = 0.035, SKY = 0.1;
   const data = new Uint8Array(TILE * TILE * 4);
   const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
   for (let i = 0; i < data.length; i += 4) {
@@ -68,14 +69,14 @@ function createGrain(renderer) {
   pass('vec4(t.rrr, 0.0)', { blendSrc: THREE.DstColorFactor, blendDst: THREE.SrcColorFactor,
     blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor }, 1);
   // drawn behind what's there, so it only lands on the empty part of the canvas
-  pass('vec4(t.ggg, t.a)', { blendSrc: THREE.OneMinusDstAlphaFactor, blendDst: THREE.OneFactor,
+  if (sky) pass('vec4(t.ggg, t.a)', { blendSrc: THREE.OneMinusDstAlphaFactor, blendDst: THREE.OneFactor,
     blendSrcAlpha: THREE.OneMinusDstAlphaFactor, blendDstAlpha: THREE.OneFactor }, 2);
   const cam = new THREE.Camera();
   let last = -Infinity;
   return {
     compile: () => renderer.compileAsync(scene, cam),
     render(now) {
-      if (now - last >= 1000 / FPS) { last = now; uniforms.uOffset.value.set(Math.random(), Math.random()); }
+      if (now - last >= 1000 / GRAIN_FPS) { last = now; uniforms.uOffset.value.set(Math.random(), Math.random()); }
       // 1 grain per CSS pixel, or 2 on low-resolution displays, where that's too fine to see
       const lowRes = Math.min(window.innerWidth, window.innerHeight) * (window.devicePixelRatio || 1) < 1000;
       uniforms.uScale.value = 1 / ((lowRes ? 2 : 1) * renderer.getPixelRatio() * TILE);
@@ -88,15 +89,26 @@ function createGrain(renderer) {
 const COMPILE_BUDGET_MS = 5000;              // shaders must compile within this
 const STRETCH_START = 0.2, STRETCH_DELAY = 0.15, STRETCH_SECONDS = 2.2;   // the name's colours stretching back on arrival
 const SPEED_CHECK = { settleMs: 500, windowMs: 3000, minFps: 18 };   // measured once live
+const GLIDE_MS = 90;   // iOS reports scroll in uneven bursts: globules and stars ease toward each report
 
-export async function initHero(canvas, hero, { force = false, signal, onLive, onGiveUp }) {
+function createRenderer(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // Never more than the screen's real pixels. Without a viewport tag, iOS lays the page out 980px
+  // wide and scales it down, so devicePixelRatio alone asks for over twice what the screen shows.
+  const dpr = window.devicePixelRatio || 1;
+  renderer.setPixelRatio(Math.min(dpr, 2, dpr * (window.visualViewport?.scale || 1)));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   // Wide-gamut screens show these same values more saturated, for extra vividness. Browsers or
   // screens without Display P3 just stay in sRGB.
   renderer.getContext().drawingBufferColorSpace = 'display-p3';
   renderer.toneMapping = THREE.NoToneMapping;
+  renderer.autoClear = false;
+  return renderer;
+}
+
+export async function initHero(canvas, nameCanvas, hero, { force = false, signal, onLive, onGiveUp }) {
+  const renderer = createRenderer(canvas);
+  const nameRenderer = createRenderer(nameCanvas);
 
   // Giving up has to stop everything: hidden but still running, this costs almost as much as
   // showing it (measured on a Raspberry Pi 5: ~10fps while running, 70+ once truly stopped).
@@ -108,20 +120,17 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
     stopped = true;
     listeners.abort();
     resizeObserver?.disconnect();
-    renderer.dispose();
-    renderer.forceContextLoss();   // releases the GPU memory now, not whenever GC gets to it
+    for (const r of [renderer, nameRenderer]) {
+      r.dispose();
+      r.forceContextLoss();   // releases the GPU memory now, not whenever GC gets to it
+    }
     onGiveUp(reason);
   }
   signal?.addEventListener('abort', () => giveUp('load-timeout'), { once: true });
-  renderer.debug.onShaderError = (gl, program, vs, fs) => {
+  renderer.debug.onShaderError = nameRenderer.debug.onShaderError = (gl, program, vs, fs) => {
     console.error('Live hero shader failed', gl.getProgramInfoLog(program), gl.getShaderInfoLog(fs));
     giveUp('shader-error');
   };
-
-  const scene = new THREE.Scene();
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
 
   function addLights(target) {
     target.add(new THREE.AmbientLight(0xffffff, 0.55));
@@ -132,8 +141,6 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
     rim.position.set(0.8, -0.4, 0.6);
     target.add(rim);
   }
-  addLights(scene);
-  renderer.autoClear = false;
 
   const [blobs, fontJson] = await Promise.all([
     createBlobs(renderer, BASE),
@@ -156,7 +163,6 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
 
   const font = new FontLoader().parse(fontJson);
   const textScene = new THREE.Scene();
-  textScene.environment = scene.environment;
   addLights(textScene);
   const text = new THREE.Group();
     textScene.add(text);
@@ -165,7 +171,7 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
   const SIZE = 100;
   const capMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
   // walls: mostly self-lit gradient with only a little diffuse shading, so they stay as saturated as the artwork
-  const wallMat = new THREE.MeshStandardMaterial({ vertexColors: true, color: 0x3a3a3a, roughness: 0.9, metalness: 0, envMapIntensity: 0.0 });
+  const wallMat = new THREE.MeshStandardMaterial({ vertexColors: true, color: 0x3a3a3a, roughness: 0.9, metalness: 0 });
   wallMat.onBeforeCompile = (shader) => {
     // keep the walls as saturated as the 2D gradient: add the vertex colour back in as glow
     shader.fragmentShader = shader.fragmentShader.replace(
@@ -255,11 +261,13 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
   let textCenterY = 0, textDist = 1, textK = 1;
 
   // ---------- Layout ----------
-  let vw = 1, vh = 1;
+  let vw = 1, vh = 1, nameDrawnAt = null;
   function layout() {
     // the canvas is fixed to the viewport: globules stay behind the whole site
     vw = Math.max(1, canvas.clientWidth); vh = Math.max(1, canvas.clientHeight);
     renderer.setSize(vw, vh, false);
+    nameRenderer.setSize(vw, vh, false);
+    nameDrawnAt = null;   // resizing wipes the canvas
     blobs.layout(vw, vh, renderer.getPixelRatio());
     stars.layout(vw, vh, renderer.getPixelRatio());
 
@@ -274,7 +282,6 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
     textDist = (vh / 2) / Math.tan(THREE.MathUtils.degToRad(TEXT_FOV / 2));
     textCamera.far = textDist + DEPTH_ART * textK * 2 + 1000;
     textCamera.position.set(0, textCenterY, textDist);
-    textCamera.setViewOffset(vw, vh, 0, textCenterY, vw, vh);
   }
 
   // ---------- Interaction / animation ----------
@@ -286,7 +293,8 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
   window.addEventListener('scroll', () => { readScroll(); if (reduceMotion && running) frame(); },
     { passive: true, signal: listeners.signal });
 
-  const grain = createGrain(renderer);
+  const grain = createGrain(renderer, { sky: true });
+  const nameGrain = createGrain(nameRenderer, { sky: false });   // the sky is already behind it
   const stars = createStars(renderer);
   const clock = new THREE.Clock();
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -302,6 +310,7 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
     return Math.max(0.002, (onScreen * textDist / (1 - onScreen)) / full);
   }
 
+  let glide = 0, glidedAt = 0, nameGrainAt = 0;
   function frame() {
     const t = reduceMotion ? 0 : clock.getElapsedTime();
 
@@ -314,19 +323,32 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
     text.scale.z = textK * (1 - 0.88 * smooth(0, 1.1, sv)) * arrival(t);
     text.visible = sv < 1.6;
 
+    // ---- behind the page: glides toward the reported scroll position ----
+    const now = performance.now(), dt = Math.min(100, now - glidedAt);
+    glidedAt = now;
+    glide = reduceMotion ? scrollOffset : glide + (scrollOffset - glide) * (1 - Math.exp(-dt / GLIDE_MS));
+    if (Math.abs(scrollOffset - glide) < 0.25) glide = scrollOffset;
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
-    stars.render(t);
-    blobs.render(scrollOffset);
-    if (text.visible) {
-      renderer.clearDepth();
+    stars.render(t, glide);
+    blobs.render(glide);
+    grain.render(now);
+
+    // ---- the name: its canvas scrolls with the page, so its scroll is undone inside the canvas.
+    // Only redrawn when something in it changes: the walls, or the grain's next jump. ----
+    const grainDue = now - nameGrainAt >= 1000 / GRAIN_FPS;
+    const arriving = !reduceMotion && t < STRETCH_DELAY + STRETCH_SECONDS + 0.1;
+    if (text.visible && (arriving || grainDue || nameDrawnAt !== scrollOffset)) {
+      if (grainDue) nameGrainAt = now;
+      nameDrawnAt = scrollOffset;
+      textCamera.setViewOffset(vw, vh, 0, textCenterY - scrollOffset, vw, vh);
+      nameRenderer.setClearColor(0x000000, 0);
+      nameRenderer.clear();
       capMat.visible = false; wallMat.visible = true;
-      renderer.render(textScene, textCamera);
-    }
-    grain.render(performance.now());
-    if (text.visible) {
+      nameRenderer.render(textScene, textCamera);
+      nameGrain.render(now);
       capMat.visible = true; wallMat.visible = false;
-      renderer.render(textScene, textCamera);
+      nameRenderer.render(textScene, textCamera);
     }
   }
 
@@ -355,11 +377,12 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
 
   layout();
   readScroll();
+  glide = scrollOffset;   // arriving partway down the page: start there, no glide
 
   // Compile in the background with a time limit, so a weak GPU can't hold the page up for minutes.
   // The clock starts here, once the assets are in: a slow network says nothing about the device.
   const compileStart = performance.now();
-  const compiled = Promise.all([blobs.compile(), stars.compile(), renderer.compileAsync(textScene, textCamera), grain.compile()]);
+  const compiled = Promise.all([blobs.compile(), stars.compile(), nameRenderer.compileAsync(textScene, textCamera), grain.compile(), nameGrain.compile()]);
   const limit = new Promise((resolve) => setTimeout(() => resolve('timeout'), COMPILE_BUDGET_MS));
   if (await (force ? compiled : Promise.race([compiled, limit])) === 'timeout') giveUp('compile-timeout');
   if (stopped) return;

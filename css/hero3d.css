@@ -10,7 +10,7 @@ body.space { background: transparent; margin: 0; }
   overflow: hidden;
 }
 
-/* fixed: the globules stay behind the whole site; the name scrolls away inside it */
+/* fixed: the stars and globules stay behind the whole site */
 #hero3d-canvas {
   position: fixed;
   inset: 0;
@@ -23,6 +23,21 @@ body.space { background: transparent; margin: 0; }
 }
 html[data-backdrop="live"] #hero3d-canvas { visibility: visible; }
 html[data-backdrop="static"] #hero3d-canvas { display: none; }
+
+/* the name scrolls with the page, so it stays locked to the HTML */
+#hero3d-name {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  display: block;
+  z-index: -1;
+  visibility: hidden;
+}
+html[data-backdrop="live"] #hero3d-name { visibility: visible; }
+html[data-backdrop="static"] #hero3d-name { display: none; }
 
 /* Static design: wallpaper + flat name. The page stays black while the live hero gets its chance;
    js/backdrop.js shows this only if the hero can't run. Not displayed means not downloaded. */
