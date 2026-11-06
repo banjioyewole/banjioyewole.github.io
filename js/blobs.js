@@ -2,19 +2,23 @@
 // as the page scrolls, each at its own rate as if at its own depth. Position comes directly from
 // the scroll offset, so scrolling back to the top returns them exactly to where they started.
 //
-// Rendering: a 2D signed-distance field of the baked outlines, with shading baked from the same
-// shapes inflated like balloons, so they read as rounded objects. It renders at reduced resolution into a render target, only when
-// the scroll or layout changes; colour is upscaled as is, but alpha holds the distance to the
-// silhouette, so edges stay sharp at full resolution.
+// Rendering: a 2D signed-distance field of the outlines, with shading baked from the same shapes
+// inflated like balloons, so they read as rounded objects. It renders at reduced resolution into a
+// render target, only when something moves; colour is upscaled as is, but alpha holds the distance
+// to the silhouette, so edges stay sharp at full resolution.
+//
+// Mouse and trackpad: drawn on the shared canvas, which stays in step with the scroll position.
+// Touch screens: iOS moves the page without waiting for JavaScript and reports the scroll late and
+// in bursts, so each globule is baked once into its own layer, moved by a scroll-driven animation.
 import * as THREE from 'three';
 
 const ORIGINALS = 4;       // the wallpaper's globules, always first in blobs.json
 const ATLAS_TILES = 5;     // baked shapes: those, plus tools/blob_extra.png
-const RES_SCALE = 0.5;     // shader resolution relative to the canvas
+const RES_SCALE = 0.5;     // shader resolution relative to the layer
 const LIGHT = 0.2;         // how strongly the baked shading affects the wallpaper's colours
 const VIVID = 1.2;         // saturation boost on top of the wallpaper's colours
-// how far each blob rises per px scrolled (nearer blobs move faster) and how much it grows per screenful
-const DEPTH = { tl: { rise: 0.5, grow: 0.1 }, tr: { rise: 0.32, grow: 0.05 }, bl: { rise: 0.62, grow: 0.14 }, br: { rise: 0.24, grow: 0.03 } };
+// how far each blob rises per px scrolled (nearer blobs move faster)
+const RISE = { tl: 0.5, tr: 0.32, bl: 0.62, br: 0.24 };
 // More globules further down the page, reusing those shapes. Each passes through the middle of the
 // screen after scrolling `at` screenfuls: x is a fraction of the width from centre, size is relative
 // to the original shape, and mirror flips it so it doesn't read as a copy.
@@ -133,7 +137,8 @@ export async function createBlobs(renderer, baseUrl) {
   const meta = await fetch(new URL('blobs.json', baseUrl)).then((r) => r.json());
   const baked = meta.blobs.slice(0, ATLAS_TILES), originals = baked.slice(0, ORIGINALS);
   const tileOf = (name) => baked.findIndex((b) => b.name === name);
-  const shapes = [...originals.map((b, tile) => ({ tile, b })), ...FURTHER_DOWN.map((e) => ({ tile: tileOf(e.shape), b: baked[tileOf(e.shape)] }))];
+  const shapes = [...originals.map((b, tile) => ({ tile, b, extraSize: 1, mirror: 1 })),
+    ...FURTHER_DOWN.map((e) => ({ tile: tileOf(e.shape), b: baked[tileOf(e.shape)], extraSize: e.size, mirror: e.mirror ? -1 : 1 }))];
 
   // ---- baked outlines: one atlas, blobs side by side; red + green hold a 12-bit distance ----
   const img = await loadImage(new URL('sdf_atlas.png', baseUrl).href);
@@ -198,30 +203,93 @@ export async function createBlobs(renderer, baseUrl) {
   rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter;
   compMat.uniforms.uTex.value = rt.texture;
 
-  let vw = 1, vh = 1, home = [], scale = 1, dirty = true, maxScroll = 0;
+  const layered = 'ScrollTimeline' in window && matchMedia('(pointer: coarse)').matches;
+  const page = document.scrollingElement;   // <body>: this page has no doctype, so it's in quirks mode
+  let vw = 1, vh = 1, dpr = 1, home = [], scale = 1, maxScroll = 0, layers = [], timeline = null;
+  let dirty = true, drawnAt = null;
+
+  // Where a globule's centre sits with the page scrolled by `offset`: CSS px, origin centre, y up
+  function positionAt(index, offset) {
+    if (index < ORIGINALS) return { x: home[index].x, y: home[index].y + offset * RISE[shapes[index].b.name] };
+    const extra = FURTHER_DOWN[index - ORIGINALS];
+    const settlesAt = extra.atBottom ? maxScroll : extra.at * vh, settledY = extra.atBottom ? -vh / 2 : 0;
+    return { x: extra.x * vw, y: (offset - settlesAt) * extra.rise + settledY };
+  }
+
+  function transformAt({ index, w, h }, offset) {
+    const { x, y } = positionAt(index, offset);
+    return `translate(${(vw / 2 + x - w / 2).toFixed(2)}px, ${(vh / 2 - y - h / 2).toFixed(2)}px)`;
+  }
+
+  const keyframes = (layer) => [{ transform: transformAt(layer, 0) }, { transform: transformAt(layer, maxScroll) }];
+
   // the page's height changes as its sections and images load
   function measurePage() {
-    maxScroll = Math.max(0, document.documentElement.scrollHeight - vh);
+    maxScroll = Math.max(0, page.scrollHeight - page.clientHeight);
     dirty = true;
+    for (const layer of layers) layer.animation.effect.setKeyframes(keyframes(layer));
   }
-  new ResizeObserver(measurePage).observe(document.body);
+  const pageObserver = new ResizeObserver(measurePage);
+  pageObserver.observe(document.body);
 
-  function place(scrollOffset) {
-    const screens = scrollOffset / vh;
-    originals.forEach((b, i) => {
-      const depth = DEPTH[b.name], h = home[i];
-      uniforms.uBk.value[i].set(h.x, h.y + scrollOffset * depth.rise, scale * (1 + depth.grow * screens), 1);
-    });
-    FURTHER_DOWN.forEach((e, i) => {
-      const settlesAt = e.atBottom ? maxScroll : e.at * vh, settledY = e.atBottom ? -vh / 2 : 0;
-      uniforms.uBk.value[ORIGINALS + i].set(e.x * vw, (scrollOffset - settlesAt) * e.rise + settledY, scale * e.size, e.mirror ? -1 : 1);
-    });
+  function bakeLayer(index) {
+    const extra = index < ORIGINALS ? null : FURTHER_DOWN[index - ORIGINALS];
+    const { b, extraSize, mirror } = shapes[index], size = scale * extraSize;
+    const turn = ((extra?.turn || 0) * Math.PI) / 180, cos = Math.abs(Math.cos(turn)), sin = Math.abs(Math.sin(turn));
+    const w = Math.ceil((cos * b.w + sin * b.h) * size + 8), h = Math.ceil((sin * b.w + cos * b.h) * size + 8);
+
+    renderer.setSize(w, h, false);
+    uniforms.uView.value.set(w, h);
+    uniforms.uBk.value.forEach((v) => v.set(1e7, 1e7, 1e-3, 1));   // everything else out of the way
+    uniforms.uBk.value[index].set(0, 0, size, mirror);
+    const k = RES_SCALE * Math.min(dpr, 1.5);
+    const rw = Math.max(1, Math.round(w * k)), rh = Math.max(1, Math.round(h * k));
+    rt.setSize(rw, rh);
+    compMat.uniforms.uTexel.value.set(1 / rw, 1 / rh);
+    renderer.setRenderTarget(rt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(fieldScene, cam);
+    renderer.setRenderTarget(null);
+    renderer.clear();
+    renderer.render(compScene, cam);
+
+    const el = document.createElement('canvas');
+    el.className = 'hero3d-globule';
+    el.setAttribute('aria-hidden', 'true');
+    el.width = renderer.domElement.width;
+    el.height = renderer.domElement.height;
+    el.getContext('2d', { colorSpace: 'display-p3' }).drawImage(renderer.domElement, 0, 0);
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    document.body.prepend(el);
+    return { el, index, w, h, animation: null };
+  }
+
+  function removeLayers() {
+    layers.forEach((layer) => layer.el.remove());
+    layers = [];
+  }
+
+  // Borrows the canvas to draw on, so the caller has to redraw it afterwards.
+  function bake() {
+    if (!layered) return;
+    removeLayers();
+    layers = shapes.map((_, index) => bakeLayer(index));
+    renderer.setSize(vw, vh, false);
+    timeline ||= new ScrollTimeline({ source: page, axis: 'block' });
+    maxScroll = Math.max(0, page.scrollHeight - page.clientHeight);
+    for (const layer of layers) {
+      // in place by itself too: the animation has no effect whenever the timeline is inactive
+      layer.el.style.transform = transformAt(layer, page.scrollTop);
+      layer.animation = layer.el.animate(keyframes(layer), { timeline, fill: 'both', easing: 'linear' });
+    }
   }
 
   return {
-    layout(w, h, dpr) {
-      vw = w; vh = h;
-      measurePage();
+    layered,
+    layout(w, h, ratio) {
+      vw = w; vh = h; dpr = ratio;
       uniforms.uView.value.set(vw, vh);
       // same placement as the old wallpaper, corner-anchored on narrow screens
       const iw = meta.imageW, ih = meta.imageH;
@@ -239,18 +307,24 @@ export async function createBlobs(renderer, baseUrl) {
       compMat.uniforms.uDpr.value = dpr;
       uEdge.value = 3 / k;   // three render-target pixels, enough for the bicubic footprint
       dirty = true;
+      if (layers.length) bake();
     },
     // Starts the shaders compiling without blocking the page; resolves when they're ready.
     compile() {
-      renderer.setRenderTarget(rt);   // shaders are compiled per kind of output, so match render()
+      renderer.setRenderTarget(rt);   // shaders are compiled per kind of output, so match the bake
       const field = renderer.compileAsync(fieldScene, cam);
       renderer.setRenderTarget(null);
       return Promise.all([field, renderer.compileAsync(compScene, cam)]);
     },
-    render(scrollOffset) {
-      if (dirty || scrollOffset !== this.lastOffset) {   // nothing moves between scrolls
-        place(scrollOffset);
-        this.lastOffset = scrollOffset; dirty = false;
+    bake,
+    render(offset) {
+      if (layered) return;
+      if (dirty || offset !== drawnAt) {   // nothing moves between scrolls
+        shapes.forEach(({ extraSize, mirror }, index) => {
+          const { x, y } = positionAt(index, offset);
+          uniforms.uBk.value[index].set(x, y, scale * extraSize, mirror);
+        });
+        drawnAt = offset; dirty = false;
         renderer.setRenderTarget(rt);
         renderer.setClearColor(0x000000, 0);
         renderer.clear();
@@ -258,6 +332,10 @@ export async function createBlobs(renderer, baseUrl) {
         renderer.setRenderTarget(null);
       }
       renderer.render(compScene, cam);
+    },
+    remove() {
+      pageObserver.disconnect();
+      removeLayers();
     }
   };
 }

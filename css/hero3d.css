@@ -18,11 +18,38 @@ body.space { background: transparent; margin: 0; }
   height: 100vh;
   pointer-events: none;
   display: block;
-  z-index: -2;
+  z-index: -4;
   visibility: hidden;   /* until it has drawn its first frame: no fade, it just arrives */
 }
 html[data-backdrop="live"] #hero3d-canvas { visibility: visible; }
 html[data-backdrop="static"] #hero3d-canvas { display: none; }
+
+/* touch screens: each globule is its own layer, moved as the page scrolls (js/blobs.js) */
+.hero3d-globule {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: -3;
+  pointer-events: none;
+  will-change: transform;
+  display: none;
+}
+/* one tile's width of overhang on every side, for the grain to jump around in */
+.hero3d-grain {
+  position: fixed;
+  left: -512px;
+  top: -512px;
+  width: calc(100vw + 1024px);
+  height: calc(100vh + 1024px);
+  z-index: -2;
+  pointer-events: none;
+  will-change: transform;
+  image-rendering: pixelated;
+  background-size: 512px 512px;
+  display: none;
+}
+html[data-backdrop="live"] .hero3d-globule,
+html[data-backdrop="live"] .hero3d-grain { display: block; }
 
 /* the name scrolls with the page, so it stays locked to the HTML */
 #hero3d-name {
@@ -44,7 +71,7 @@ html[data-backdrop="static"] #hero3d-name { display: none; }
 #backdrop-static {
   position: fixed;
   inset: 0;
-  z-index: -4;
+  z-index: -5;
   pointer-events: none;
   background: #000 url(../assets/reigonalpha6_2560.jpg) center / cover no-repeat;
 }

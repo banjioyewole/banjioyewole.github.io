@@ -1,8 +1,9 @@
 // Hero: 3D globules + extruded name/tagline.
 // Globules: see js/blobs.js (the old wallpaper's shapes, floating up as the page scrolls).
-// Two canvases. The fixed one behind the page draws stars → globules → film grain. The name has its
-// own, inside the hero, so iOS moves it with the HTML instead of it waiting for scroll events; it
-// draws walls → film grain → white letter faces, so grain covers everything except the faces.
+// Back to front: a fixed canvas (stars → globules → film grain), then the name's canvas, which scrolls
+// with the page. The name draws walls → film grain → white letter faces, so grain covers everything
+// except the faces. Touch screens move the globules as layers instead (js/blobs.js), with their own
+// grain layer between those and the name.
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
@@ -85,11 +86,33 @@ function createGrain(renderer, { sky }) {
   };
 }
 
+// Grain over the globule layers on touch screens: a faint dark speckle (which darkens without changing hue) that the
+// browser jumps around by itself. Layers can't multiply into each other without a lot of compositing.
+function createGrainLayer() {
+  const TILE = 512, STRENGTH = 0.05, JUMPS = 12;
+  const tile = document.createElement('canvas');
+  tile.width = tile.height = TILE;
+  const cx = tile.getContext('2d'), image = cx.createImageData(TILE, TILE);
+  const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+  for (let i = 3; i < image.data.length; i += 4) image.data[i] = Math.min(255, Math.abs(gauss()) * STRENGTH * 255);
+  cx.putImageData(image, 0, 0);
+  const layer = document.createElement('div');
+  layer.className = 'hero3d-grain';
+  layer.setAttribute('aria-hidden', 'true');
+  layer.style.backgroundImage = `url(${tile.toDataURL()})`;
+  const offset = () => Math.floor(Math.random() * TILE);
+  layer.animate(Array.from({ length: JUMPS }, () => ({ transform: `translate(${offset()}px, ${offset()}px)`, easing: 'steps(1, end)' })),
+    { duration: (JUMPS / GRAIN_FPS) * 1000, iterations: Infinity });
+  return layer;
+}
+
 // How long this device gets to prove it can run the hero. Failing either means the static design.
 const COMPILE_BUDGET_MS = 5000;              // shaders must compile within this
 const STRETCH_START = 0.2, STRETCH_DELAY = 0.15, STRETCH_SECONDS = 2.2;   // the name's colours stretching back on arrival
 const SPEED_CHECK = { settleMs: 500, windowMs: 3000, minFps: 18 };   // measured once live
-const GLIDE_MS = 90;   // iOS reports scroll in uneven bursts: globules and stars ease toward each report
+// Touch screens report scroll late and in uneven bursts, so what follows it eases toward each report.
+// A mouse or trackpad's scroll is drawn as it's reported, which keeps it in step with the page.
+const GLIDE_MS = matchMedia('(pointer: coarse)').matches ? 90 : 0;
 
 function createRenderer(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -115,11 +138,13 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
   let stopped = false;
   const listeners = new AbortController();
   let resizeObserver = null;
+  let removeLayers = () => {};
   function giveUp(reason) {
     if (stopped) return;
     stopped = true;
     listeners.abort();
     resizeObserver?.disconnect();
+    removeLayers();
     for (const r of [renderer, nameRenderer]) {
       r.dispose();
       r.forceContextLoss();   // releases the GPU memory now, not whenever GC gets to it
@@ -326,7 +351,7 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
     // ---- behind the page: glides toward the reported scroll position ----
     const now = performance.now(), dt = Math.min(100, now - glidedAt);
     glidedAt = now;
-    glide = reduceMotion ? scrollOffset : glide + (scrollOffset - glide) * (1 - Math.exp(-dt / GLIDE_MS));
+    glide = reduceMotion || !GLIDE_MS ? scrollOffset : glide + (scrollOffset - glide) * (1 - Math.exp(-dt / GLIDE_MS));
     if (Math.abs(scrollOffset - glide) < 0.25) glide = scrollOffset;
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
@@ -387,6 +412,10 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
   if (await (force ? compiled : Promise.race([compiled, limit])) === 'timeout') giveUp('compile-timeout');
   if (stopped) return;
   console.info(`[backdrop] assets in at ${Math.round(compileStart)}ms, compiled in ${Math.round(performance.now() - compileStart)}ms`);
+
+  blobs.bake();
+  const grainLayer = blobs.layered ? document.body.appendChild(createGrainLayer()) : null;
+  removeLayers = () => { blobs.remove(); grainLayer?.remove(); };
 
   running = true;
   resizeObserver = new ResizeObserver(() => { layout(); readScroll(); frame(); });
