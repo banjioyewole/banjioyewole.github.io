@@ -32,8 +32,10 @@ def resample(pts, step):
     t = np.arange(0, d[-1], step)
     return np.stack([np.interp(t, d, pts[:, 0]), np.interp(t, d, pts[:, 1])], 1)
 
-def complete_silhouette(mask_full):
-    """mask_full: HxW uint8 in image coords. Returns closed contour (N,2) in image coords."""
+def complete_silhouette(mask_full, belly=None):
+    """mask_full: HxW uint8 in image coords. Returns closed contour (N,2) in image coords.
+    belly: (point, degrees): close the shape with a round ball leaving that point in a straight line
+    to the screen's edge, at that angle."""
     c, _ = cv2.findContours(mask_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     c = max(c, key=cv2.contourArea)[:, 0, :].astype(float)
     on_frame = (c[:, 0] <= 1) | (c[:, 0] >= W0 - 2) | (c[:, 1] <= 1) | (c[:, 1] >= H0 - 2)
@@ -57,6 +59,29 @@ def complete_silhouette(mask_full):
     # carry both edges straight on until they're well past the frame, so the part that closes
     # the shape stays out of sight, then join them with a curve aimed where the edges would meet
     gap = np.linalg.norm(B - A)
+    if belly is not None:
+        # leave the edge a little before the wallpaper ends, along its general direction: its last
+        # stretch bends outward, and following that into the turn leaves a notch
+        lower_first = curve[0][1] > curve[-1][1]
+        curve = curve[50:] if lower_first else curve[:-50]
+        A, B = curve[-1], curve[0]
+        if lower_first:
+            tB = curve[0] - curve[90]; tB /= np.linalg.norm(tB)
+        else:
+            tA = curve[-1] - curve[-91]; tA /= np.linalg.norm(tA)
+        # top edge's end → out of sight → straight back in along the bottom line → round the ball → right edge
+        start, degrees = belly
+        L = np.array(start, float)
+        heading = np.array([np.cos(np.radians(degrees)), np.sin(np.radians(degrees))])   # right and down
+        E = L - heading * (L[0] + 150) / heading[0]                                       # 150px past the screen's edge
+        bezier = lambda a, b, c, d: (lambda t: (1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t ** 2 * c + t ** 3 * d)(np.linspace(0, 1, 300)[:, None])
+        hidden, ball = np.linalg.norm(E - A) * 0.45, np.linalg.norm(B - L) * 0.5
+        join = np.vstack([bezier(A, A + tA * hidden, E - heading * hidden, E),
+                          np.linspace(E, L, 100)[1:],
+                          bezier(L, L + heading * ball, B + tB * ball, B)[1:]])
+        closed = np.vstack([curve, join[1:-1]])
+        closed = resample(np.vstack([closed, closed[:1]]), 4.0)[:-1]
+        return np.stack([ndimage.gaussian_filter1d(closed[:, i], 12, mode='wrap') for i in range(2)], 1)
     ext = max(250, gap * 0.3)
     Ae, Be = A + tA * ext, B + tB * ext
     mid = (Ae + Be) / 2
@@ -119,6 +144,34 @@ def balloon_shading(sil):
     shade = ndimage.gaussian_filter(shade[idx[0], idx[1]], 1.0)
     return cv2.resize(shade.astype(np.float32), (TILE, TILE), interpolation=cv2.INTER_LINEAR)[::-1]   # row 0 = bottom
 
+def carry_rim(col, sil, wallpaper_shape, frame_row, screen_left):
+    """Below the wallpaper's edge there are no real colours: carry the rim's gradient, measured from
+    the real outline just above that edge, along the completed outline, by distance from the outline.
+    It starts higher up, where the completed outline has already left the real one."""
+    DEPTH, REF, FADE_FROM, FADE_TO = 340, 70, 480, 200
+    inside = sil > 127
+    sd = (ndimage.distance_transform_edt(~inside) - ndimage.distance_transform_edt(inside)).astype(np.float32)
+    # Deep inside, where the nearest edge flips sides, plain distance creases: use a blurred one there.
+    # Right at the edge it stays exact, so the rim keeps its shape.
+    ramp = lambda a, b, v: (lambda u: u * u * (3 - 2 * u))(np.clip((v - a) / (b - a), 0, 1))
+    near_edge = ramp(-170, -30, sd)
+    sd = near_edge * sd + (1 - near_edge) * cv2.GaussianBlur(sd, (0, 0), 70)
+    row = frame_row - REF
+    edge = np.nonzero(wallpaper_shape[row])[0].max()
+    ds = np.arange(-DEPTH, 41)
+    xs = np.clip(edge + ds, 0, col.shape[1] - 1)
+    rim = cv2.GaussianBlur(col[row - 6:row + 7].astype(np.float32), (0, 0), 3)[6][xs]
+    yy, xx = np.mgrid[:col.shape[0], :col.shape[1]]
+    below = ramp(frame_row - FADE_FROM, frame_row - FADE_TO, yy)
+    depth = ramp(-DEPTH, -DEPTH * 0.45, sd)
+    around = ramp(screen_left - 160, screen_left, xx)   # all the way to the screen's edge
+    weight = (below * depth * around)[..., None]
+    idx = np.clip(np.round(sd + DEPTH).astype(int), 0, len(ds) - 1)
+    return np.round((1 - weight) * col + weight * rim[idx]).astype(np.uint8)
+
+# The bottom line leaves the ball 45° round from its lowest point and reaches the screen's edge at an
+# angle close to the top edge's 24°, just below the wallpaper's bottom edge (2846), so the corner stays covered.
+BL_BELLY = ((225, 3017), 28)
 meta = []
 texs = []
 sdf_tiles = []
@@ -129,7 +182,7 @@ for idx in order:
     cx, cy = cen[idx]
     name = ('t' if cy < H0 / 2 else 'b') + ('l' if cx < W0 / 2 else 'r')
     comp = (lab == idx).astype(np.uint8) * 255
-    contour = complete_silhouette(comp)
+    contour = complete_silhouette(comp, belly=BL_BELLY if name == 'bl' else None)   # bl's completed part is seen as it floats up
 
     # full silhouette on a padded canvas (image coords + PAD)
     canvas = np.zeros((H0 + 2 * PAD, W0 + 2 * PAD), np.uint8)
@@ -151,7 +204,8 @@ for idx in order:
     known = cv2.erode(inside_orig, np.ones((9, 9), np.uint8))
     S = 0.2
     small = cv2.resize(col, None, fx=S, fy=S, interpolation=cv2.INTER_AREA)
-    ksmall = cv2.resize(known, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_NEAREST)
+    # only pixels entirely inside what's known: shrinking mixes the rest with the empty black around it
+    ksmall = (cv2.resize(known, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_AREA) == 255).astype(np.uint8) * 255
     filled = cv2.inpaint(small, (ksmall == 0).astype(np.uint8), 12, cv2.INPAINT_TELEA)
     filled = cv2.GaussianBlur(filled, (0, 0), 3)
     filled = cv2.resize(filled, (bw, bh), interpolation=cv2.INTER_CUBIC)
@@ -159,6 +213,8 @@ for idx in order:
     fade = cv2.erode(known, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61)))
     fade = cv2.GaussianBlur(fade.astype(np.float32) / 255, (0, 0), 18)[..., None]
     col = np.round(fade * col + (1 - fade) * filled).astype(np.uint8)
+    if name == 'bl':
+        col = carry_rim(col, sil, inside_orig, H0 - oy, -ox)
     TS = min(1.0, 1024 / max(bw, bh))
     tex = cv2.resize(cv2.cvtColor(col, cv2.COLOR_BGR2RGB), (int(bw * TS), int(bh * TS)), interpolation=cv2.INTER_AREA)
     Image.fromarray(tex).save(OUT + f'blob_{name}.webp', quality=88, method=6)

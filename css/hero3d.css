@@ -25,12 +25,20 @@ html[data-backdrop="live"] #hero3d-canvas { visibility: visible; }
 html[data-backdrop="static"] #hero3d-canvas { display: none; }
 
 /* touch screens: each globule is its own layer, moved as the page scrolls (js/blobs.js) */
-.hero3d-globule {
+.hero3d-globules {
   position: fixed;
   left: 0;
   top: 0;
+  width: 100vw;
+  height: 100vh;
   z-index: -3;
   pointer-events: none;
+  will-change: transform;
+}
+.hero3d-globule {
+  position: absolute;
+  left: 0;
+  top: 0;
   will-change: transform;
   display: none;
 }
