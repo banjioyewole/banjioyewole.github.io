@@ -42,10 +42,10 @@
 <body class="space">
 
 <canvas id="starfield" aria-hidden="true"></canvas>
+<canvas id="hero3d-canvas" aria-hidden="true"></canvas>
 <canvas id="filmgrain" aria-hidden="true"></canvas>
 
 <section id="hero" class="hero3d">
-  <canvas id="hero3d-canvas" aria-hidden="true"></canvas>
   <div class="hero3d-ui" w3-include-html="/views/index_thin.html"></div>
 </section>
 
@@ -149,7 +149,7 @@
     <script type="module">
       import { initHero } from './js/hero3d.js';
       const hero = document.getElementById('hero');
-      initHero(document.getElementById('hero3d-canvas')).catch((err) => {
+      initHero(document.getElementById('hero3d-canvas'), hero).catch((err) => {
         console.warn('3D hero unavailable, using flat artwork', err);
         hero.classList.add('no-webgl');
       });

@@ -30,11 +30,13 @@ body.space { background: transparent; margin: 0; }
   overflow: hidden;
 }
 
+/* fixed: the globules stay behind the whole site; the name scrolls away inside it */
 #hero3d-canvas {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
   display: block;
   z-index: -2;
   opacity: 0;
@@ -56,7 +58,7 @@ body.space { background: transparent; margin: 0; }
 
 .hero3d-fallback { display: none; }
 .hero3d.no-webgl .hero3d-fallback { display: block; }
-.hero3d.no-webgl #hero3d-canvas { display: none; }
+
 
 .visually-hidden {
   position: absolute !important;
