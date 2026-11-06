@@ -1,18 +1,6 @@
-/* Starfield background + 3D hero */
+/* Live hero (stars, globules, name) and the static design behind it */
 html { background: #000; }
 body.space { background: transparent; margin: 0; }
-
-#starfield {
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: -3;
-  pointer-events: none;
-  opacity: 0; /* hidden until the hero canvas (which draws the grain) is ready; same fade */
-  transition: opacity 0.9s ease;
-}
-#starfield.is-ready { opacity: 1; }
 
 .hero3d {
   position: relative;
@@ -34,7 +22,21 @@ body.space { background: transparent; margin: 0; }
   opacity: 0;
   transition: opacity 0.9s ease;
 }
-#hero3d-canvas.is-ready { opacity: 1; }
+
+/* Static design: wallpaper + flat name, shown from the first paint. js/backdrop.js sets
+   data-backdrop="live" to crossfade to the hero, or "static" to stay here for good. */
+#backdrop-static {
+  position: fixed;
+  inset: 0;
+  z-index: -4;
+  pointer-events: none;
+  background: #000 url(../assets/reigonalpha6_2560.jpg) center / cover no-repeat;
+}
+#backdrop-static, .hero3d-fallback { transition: opacity 0.9s ease, visibility 0s linear 0.9s; }
+html[data-backdrop="live"] #backdrop-static,
+html[data-backdrop="live"] .hero3d-fallback { opacity: 0; visibility: hidden; }
+html[data-backdrop="live"] #hero3d-canvas { opacity: 1; }
+html[data-backdrop="static"] #hero3d-canvas { display: none; }
 
 /* resume link + scroll arrow sit on top of the canvas, pinned to the bottom */
 .hero3d-ui {
@@ -47,9 +49,6 @@ body.space { background: transparent; margin: 0; }
   justify-content: flex-end;
 }
 .hero3d-ui a { pointer-events: auto; }
-
-.hero3d-fallback { display: none; }
-.hero3d.no-webgl .hero3d-fallback { display: block; }
 
 
 .visually-hidden {

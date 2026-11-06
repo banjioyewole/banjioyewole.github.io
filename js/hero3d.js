@@ -1,12 +1,13 @@
 // Hero: 3D globules + extruded name/tagline.
 // Globules: see js/lava.js (raymarched lava lamp seeded with the old wallpaper's shapes).
-// Draw order: globules → extrusion walls → film grain → white letter faces, so grain covers
-// everything except the faces.
+// Draw order: stars → globules → extrusion walls → film grain → white letter faces, so grain
+// covers everything except the faces.
 import * as THREE from 'three';
 import { FontLoader } from 'three/addons/FontLoader.js';
 import { TextGeometry } from 'three/addons/TextGeometry.js';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
 import { createLava } from './lava.js';
+import { createStars } from './stars.js';
 
 export const BASE = new URL('../assets/hero3d/', import.meta.url);
 
@@ -29,7 +30,7 @@ const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').match
 // grain "boils" like film. Two blends, so it never greys the colours:
 //  • over anything already drawn (globules, extrusion walls): multiply, which only changes
 //    brightness, keeping hue and saturation, and leaves black alone
-//  • where the canvas is still empty (sky and stars behind it): a faint light/dark speckle
+//  • where the canvas is still empty (the sky): a faint light/dark speckle
 function createGrain(renderer) {
   const TILE = 512, MULTIPLY = 0.035, SKY = 0.1, FPS = 24;
   const data = new Uint8Array(TILE * TILE * 4);
@@ -72,15 +73,22 @@ function createGrain(renderer) {
   const cam = new THREE.Camera();
   let last = -Infinity;
   return {
+    compile: () => renderer.compileAsync(scene, cam),
     render(now) {
       if (now - last >= 1000 / FPS) { last = now; uniforms.uOffset.value.set(Math.random(), Math.random()); }
-      uniforms.uScale.value = 1 / (renderer.getPixelRatio() * TILE);   // 1 grain per CSS pixel
+      // 1 grain per CSS pixel, or 2 on low-resolution displays, where that's too fine to see
+      const lowRes = Math.min(window.innerWidth, window.innerHeight) * (window.devicePixelRatio || 1) < 1000;
+      uniforms.uScale.value = 1 / ((lowRes ? 2 : 1) * renderer.getPixelRatio() * TILE);
       renderer.render(scene, cam);
     }
   };
 }
 
-export async function initHero(canvas, hero) {
+// How long this device gets to prove it can run the hero. Failing either means the static design.
+const COMPILE_BUDGET_MS = 5000;              // shaders must compile within this
+const SPEED_CHECK = { settleMs: 500, windowMs: 3000, minFps: 18 };   // measured once live
+
+export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -88,6 +96,25 @@ export async function initHero(canvas, hero) {
   // screens without Display P3 just stay in sRGB.
   renderer.getContext().drawingBufferColorSpace = 'display-p3';
   renderer.toneMapping = THREE.NoToneMapping;
+
+  // Giving up has to stop everything: hidden but still running, this costs almost as much as
+  // showing it (measured on a Raspberry Pi 5: ~10fps while running, 70+ once truly stopped).
+  let stopped = false;
+  const listeners = new AbortController();
+  let resizeObserver = null;
+  function giveUp(reason) {
+    if (stopped) return;
+    stopped = true;
+    listeners.abort();
+    resizeObserver?.disconnect();
+    renderer.dispose();
+    renderer.forceContextLoss();   // releases the GPU memory now, not whenever GC gets to it
+    onGiveUp(reason);
+  }
+  renderer.debug.onShaderError = (gl, program, vs, fs) => {
+    console.error('Live hero shader failed', gl.getProgramInfoLog(program), gl.getShaderInfoLog(fs));
+    giveUp('shader-error');
+  };
 
   const scene = new THREE.Scene();
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -230,6 +257,7 @@ export async function initHero(canvas, hero) {
     vw = Math.max(1, canvas.clientWidth); vh = Math.max(1, canvas.clientHeight);
     renderer.setSize(vw, vh, false);
     lava.layout(vw, vh, renderer.getPixelRatio());
+    stars.layout(vw, vh, renderer.getPixelRatio());
 
     // text: same box as the old <img class="hero-transparent">: 80% wide (max 1440px),
     // centred horizontally, vertically centred at 45% of the hero (top: -10%; bottom: 0)
@@ -251,12 +279,15 @@ export async function initHero(canvas, hero) {
   // screen while the hero scrolls away, so more of the rear extrusion is revealed.
   let scrollOffset = 0;
   const readScroll = () => { scrollOffset = Math.max(0, -hero.getBoundingClientRect().top); };
-  window.addEventListener('scroll', () => { readScroll(); if (reduceMotion) frame(); }, { passive: true });
+  let running = false;
+  window.addEventListener('scroll', () => { readScroll(); if (reduceMotion && running) frame(); },
+    { passive: true, signal: listeners.signal });
   window.addEventListener('pointermove', (e) => {
     pointer.set((e.clientX / window.innerWidth) * 2 - 1, (e.clientY / window.innerHeight) * 2 - 1);
-  }, { passive: true });
+  }, { passive: true, signal: listeners.signal });
 
   const grain = createGrain(renderer);
+  const stars = createStars(renderer);
   const clock = new THREE.Clock();
   // ?lavaSpeed=8 fast-forwards the animation (handy for previewing the lava lamp); ?debug exposes it
   const params = new URLSearchParams(location.search);
@@ -287,6 +318,7 @@ export async function initHero(canvas, hero) {
 
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
+    stars.render(t);
     lava.render();
     if (text.visible) {
       renderer.clearDepth();
@@ -300,18 +332,50 @@ export async function initHero(canvas, hero) {
     }
   }
 
-  function loop() {
+  // Once live: is it actually fast enough? Skipped if the tab was hidden partway (no frames then).
+  let check = null;
+  function checkSpeed(now) {
+    if (!check) return;
+    if (now - check.last > 1000) { check.start = now + SPEED_CHECK.settleMs; check.frames = 0; }
+    check.last = now;
+    if (now < check.start) return;
+    check.frames++;
+    const elapsed = now - check.start;
+    if (elapsed < SPEED_CHECK.windowMs) return;
+    const fps = (check.frames / elapsed) * 1000;
+    check = null;
+    console.info(`[backdrop] speed check: ${fps.toFixed(1)}fps (needs ${SPEED_CHECK.minFps})`);
+    if (fps < SPEED_CHECK.minFps) giveUp('too-slow');
+  }
+
+  function loop(now) {
+    if (stopped) return;
     frame();
+    checkSpeed(now);
     requestAnimationFrame(loop);
   }
 
-  new ResizeObserver(() => { layout(); readScroll(); frame(); }).observe(canvas);
   layout();
   readScroll();
   lastScroll = scrollOffset;
+
+  // Compile in the background with a time limit, so a weak GPU can't hold the page up for minutes.
+  // The clock starts here, once the assets are in: a slow network says nothing about the device.
+  const compileStart = performance.now();
+  const compiled = Promise.all([lava.compile(), stars.compile(), renderer.compileAsync(textScene, textCamera), grain.compile()]);
+  const limit = new Promise((resolve) => setTimeout(() => resolve('timeout'), COMPILE_BUDGET_MS));
+  if (await (force ? compiled : Promise.race([compiled, limit])) === 'timeout') giveUp('compile-timeout');
+  if (stopped) return;
+  console.info(`[backdrop] assets in at ${Math.round(compileStart)}ms, compiled in ${Math.round(performance.now() - compileStart)}ms`);
+
+  running = true;
+  resizeObserver = new ResizeObserver(() => { layout(); readScroll(); frame(); });
+  resizeObserver.observe(canvas);
   frame();
-  if (!reduceMotion) requestAnimationFrame(loop);
-  canvas.classList.add('is-ready');
-  window.dispatchEvent(new Event('hero-ready'));
-  return { renderer, scene };
+  if (!reduceMotion) {
+    const now = performance.now();
+    if (!force) check = { start: now + SPEED_CHECK.settleMs, last: now, frames: 0 };
+    requestAnimationFrame(loop);
+  }
+  onLive();
 }
