@@ -8,7 +8,8 @@
 // silhouette, so edges stay sharp at full resolution.
 import * as THREE from 'three';
 
-const ATLAS_TILES = 4;     // baked shapes
+const ORIGINALS = 4;       // the wallpaper's globules, always first in blobs.json
+const ATLAS_TILES = 5;     // baked shapes: those, plus tools/blob_extra.png
 const RES_SCALE = 0.5;     // shader resolution relative to the canvas
 const LIGHT = 0.2;         // how strongly the baked shading affects the wallpaper's colours
 const VIVID = 1.2;         // saturation boost on top of the wallpaper's colours
@@ -17,13 +18,15 @@ const DEPTH = { tl: { rise: 0.5, grow: 0.1 }, tr: { rise: 0.32, grow: 0.05 }, bl
 // More globules further down the page, reusing those shapes. Each passes through the middle of the
 // screen after scrolling `at` screenfuls: x is a fraction of the width from centre, size is relative
 // to the original shape, and mirror flips it so it doesn't read as a copy.
+// atBottom instead of at: it ends up centred on the screen's bottom edge when the page is scrolled
+// all the way down, so half of it shows. turn rotates it anticlockwise, in degrees.
 const FURTHER_DOWN = [
   { shape: 'br', at: 2.5, x: -0.44, size: 1.5, rise: 0.3, mirror: true },
   { shape: 'tr', at: 5.5, x: 0.5, size: 0.8, rise: 0.26, mirror: true },
   { shape: 'tl', at: 7, x: -0.5, size: 0.8, rise: 0.28, mirror: false },
-  { shape: 'bl', at: 8, x: 0.5, size: 0.65, rise: 0.3, mirror: true }
+  { shape: 'extra', atBottom: true, x: 0.42, size: 0.8, rise: 0.3, mirror: false, turn: 90 }
 ];
-const NB = ATLAS_TILES + FURTHER_DOWN.length;
+const NB = ORIGINALS + FURTHER_DOWN.length;
 
 const VERT = /* glsl */`
 in vec3 position; in vec2 uv;
@@ -40,6 +43,7 @@ uniform vec2 uView;            // viewport size in CSS px
 uniform float uEdge;           // distances to the silhouette are stored within ±uEdge (px)
 uniform vec4 uBk[NB];          // x, y, scale, x mirror (1 or -1)
 uniform float uBkTile[NB];     // which baked shape
+uniform vec2 uBkTurn[NB];      // cos, sin of its anticlockwise rotation
 uniform float uBkRange[NB];    // distances are stored as a fraction of this (local px)
 uniform vec2 uBkSize[NB];      // bbox w, h (local px)
 uniform sampler2D uSdf;
@@ -47,8 +51,14 @@ uniform sampler2D uShade;
 uniform vec2 uSdfInset;        // half a texel of one atlas tile, in tile uv
 uniform sampler2D uColor;
 
+vec2 toLocal(int b, vec2 p) {
+  vec2 q = (p - uBk[b].xy) / uBk[b].z;
+  vec2 t = uBkTurn[b];
+  return vec2(q.x * t.x + q.y * t.y, q.y * t.x - q.x * t.y) * vec2(uBk[b].w, 1.0);
+}
+
 float blobDist(int b, vec2 p) {
-  vec2 lp = (p - uBk[b].xy) / uBk[b].z * vec2(uBk[b].w, 1.0);
+  vec2 lp = toLocal(b, p);
   vec2 sz = uBkSize[b];
   vec2 c = clamp(lp / sz + 0.5, uSdfInset, 1.0 - uSdfInset);
   float d = texture(uSdf, vec2((uBkTile[b] + c.x) / ATLAS_TILES, c.y)).r * uBkRange[b];
@@ -74,7 +84,7 @@ void main() {
   float d = nearest(p, b);
   if (b < 0 || d >= uEdge) { outColor = vec4(0.0); return; }
 
-  vec2 lp = (p - uBk[b].xy) / uBk[b].z * vec2(uBk[b].w, 1.0);
+  vec2 lp = toLocal(b, p);
   vec3 base = texture(uColor, vec2((uBkTile[b] + clamp(lp.x / uBkSize[b].x + 0.5, 0.002, 0.998)) / ATLAS_TILES,
                                    clamp(lp.y / uBkSize[b].y + 0.5, 0.002, 0.998))).rgb;
 
@@ -121,9 +131,9 @@ function loadImage(url) {
 
 export async function createBlobs(renderer, baseUrl) {
   const meta = await fetch(new URL('blobs.json', baseUrl)).then((r) => r.json());
-  const baked = meta.blobs.slice(0, ATLAS_TILES);
+  const baked = meta.blobs.slice(0, ATLAS_TILES), originals = baked.slice(0, ORIGINALS);
   const tileOf = (name) => baked.findIndex((b) => b.name === name);
-  const shapes = [...baked.map((b, tile) => ({ tile, b })), ...FURTHER_DOWN.map((e) => ({ tile: tileOf(e.shape), b: baked[tileOf(e.shape)] }))];
+  const shapes = [...originals.map((b, tile) => ({ tile, b })), ...FURTHER_DOWN.map((e) => ({ tile: tileOf(e.shape), b: baked[tileOf(e.shape)] }))];
 
   // ---- baked outlines: one atlas, blobs side by side; red + green hold a 12-bit distance ----
   const img = await loadImage(new URL('sdf_atlas.png', baseUrl).href);
@@ -159,6 +169,8 @@ export async function createBlobs(renderer, baseUrl) {
     uEdge,
     uBk: { value: shapes.map(() => new THREE.Vector4()) },
     uBkTile: { value: shapes.map((s) => s.tile) },
+    uBkTurn: { value: [...originals.map(() => new THREE.Vector2(1, 0)),
+      ...FURTHER_DOWN.map((e) => new THREE.Vector2(Math.cos((e.turn || 0) * Math.PI / 180), Math.sin((e.turn || 0) * Math.PI / 180)))] },
     uBkRange: { value: shapes.map((s) => s.b.range) },
     uBkSize: { value: shapes.map((s) => new THREE.Vector2(s.b.w, s.b.h)) },
     uSdf: { value: sdfTex },
@@ -186,27 +198,35 @@ export async function createBlobs(renderer, baseUrl) {
   rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter;
   compMat.uniforms.uTex.value = rt.texture;
 
-  let vw = 1, vh = 1, home = [], scale = 1, dirty = true;
+  let vw = 1, vh = 1, home = [], scale = 1, dirty = true, maxScroll = 0;
+  // the page's height changes as its sections and images load
+  function measurePage() {
+    maxScroll = Math.max(0, document.documentElement.scrollHeight - vh);
+    dirty = true;
+  }
+  new ResizeObserver(measurePage).observe(document.body);
 
   function place(scrollOffset) {
     const screens = scrollOffset / vh;
-    baked.forEach((b, i) => {
+    originals.forEach((b, i) => {
       const depth = DEPTH[b.name], h = home[i];
       uniforms.uBk.value[i].set(h.x, h.y + scrollOffset * depth.rise, scale * (1 + depth.grow * screens), 1);
     });
     FURTHER_DOWN.forEach((e, i) => {
-      uniforms.uBk.value[ATLAS_TILES + i].set(e.x * vw, (scrollOffset - e.at * vh) * e.rise, scale * e.size, e.mirror ? -1 : 1);
+      const settlesAt = e.atBottom ? maxScroll : e.at * vh, settledY = e.atBottom ? -vh / 2 : 0;
+      uniforms.uBk.value[ORIGINALS + i].set(e.x * vw, (scrollOffset - settlesAt) * e.rise + settledY, scale * e.size, e.mirror ? -1 : 1);
     });
   }
 
   return {
     layout(w, h, dpr) {
       vw = w; vh = h;
+      measurePage();
       uniforms.uView.value.set(vw, vh);
       // same placement as the old wallpaper, corner-anchored on narrow screens
       const iw = meta.imageW, ih = meta.imageH;
       scale = Math.min(Math.max(vw / iw, vh / ih), (vw / iw) * (vw < vh ? 1.3 : 1.7));
-      home = baked.map((m) => {
+      home = originals.map((m) => {
         const left = m.name[1] === 'l', top = m.name[0] === 't';
         const cxp = left ? (m.x + m.w / 2) * scale : vw - (iw - (m.x + m.w / 2)) * scale;
         const cyp = top ? (m.y + m.h / 2) * scale : vh - (ih - (m.y + m.h / 2)) * scale;

@@ -1,11 +1,12 @@
-// Decides which backdrop this visitor gets. Everyone starts on the static design (wallpaper and
-// flat name: instant, and cheap to scroll); the live hero loads behind it and crossfades in only
-// if this device can run it. The state lives on <html data-backdrop="live|static"> (css/hero3d.css).
+// Decides which backdrop this visitor gets. The live hero gets the first try, with the page black
+// until it can draw; the static design (wallpaper and flat name) appears only if it can't run or
+// takes too long. The state lives on <html data-backdrop="live|static"> (css/hero3d.css).
 //
 //   ?hero=static  always the static design
 //   ?hero=live    always the live hero, skipping the speed checks
 const root = document.documentElement;
 const mode = new URLSearchParams(location.search).get('hero');
+const LOAD_LIMIT_MS = 8000;   // how long to leave the page black before settling for the static design
 
 function setState(state, reason) {
   root.dataset.backdrop = state;
@@ -20,16 +21,25 @@ function hasWebGL2() {
 }
 
 async function startLive() {
+  const force = mode === 'live';
+  const attempt = new AbortController();
+  const limit = force ? null : setTimeout(() => {
+    attempt.abort();
+    if (!root.dataset.backdrop) setState('static', 'load-timeout');
+  }, LOAD_LIMIT_MS);
   try {
     const { initHero } = await import('./hero3d.js');
+    if (attempt.signal.aborted) return;
     await initHero(document.getElementById('hero3d-canvas'), document.getElementById('hero'), {
-      force: mode === 'live',
-      onLive: () => setState('live'),
-      onGiveUp: (reason) => setState('static', reason)
+      force,
+      signal: attempt.signal,
+      onLive: () => { clearTimeout(limit); setState('live'); },
+      onGiveUp: (reason) => { clearTimeout(limit); setState('static', reason); }
     });
   } catch (err) {
-    console.warn('Live hero unavailable, keeping the static design', err);
-    setState('static', 'load-error');
+    clearTimeout(limit);
+    console.warn('Live hero unavailable, using the static design', err);
+    if (!root.dataset.backdrop) setState('static', 'load-error');
   }
 }
 
