@@ -1,80 +1,29 @@
-// Lava lamp: raymarched metaball globules with simple lava physics.
+// Lava lamp, pre-rendered for phones: 2D metaballs with a 3D-shaded surface.
 //
-// Rendering: one full-screen shader raymarches a signed-distance field made of
-//   • the four original globules (baked SDF volumes extracted from the old wallpaper), and
-//   • spherical/ellipsoidal "wax" globules from the simulation,
-// all joined with a smooth minimum, so nearby globules bridge, merge and neck apart
-// naturally. It renders at reduced resolution into a render target and is upscaled.
+// Every globule is drawn as ONE small quad into a low-resolution half-float buffer, adding up
+// a smooth "field" (additive blending): wax globules use a cheap procedural falloff, the four
+// original shapes use field sprites pre-rendered offline (tools/make_blobs.py). Where fields
+// overlap they sum, so globules bridge, merge and neck apart for free. A single full-resolution
+// pass then thresholds the field into crisp silhouettes and shades them using a height derived
+// from the field — a few texture reads per pixel instead of raymarching.
 //
-// Simulation (JS, screen pixels, y up): globules are heated at the bottom and cool near the
-// top, so they rise, slow, drift and mostly gather/escape at the top. Touching globules pull
-// together and merge (volume is transferred, so nothing pops); big ones occasionally split.
-// Fresh globules are spawned below the screen and float up. The originals hold their exact
-// starting composition, then are released one by one and relax into the lava.
+// Simulation (JS, screen px, y up): globules are heated at the bottom and cool near the top, so
+// they rise, slow, drift and mostly gather/escape at the top. Touching globules pull together and
+// merge (area is transferred, so nothing pops); big ones occasionally split. Fresh globules
+// spawn below the screen. The originals hold their exact starting composition, then are
+// released one by one and melt into the lava.
 import * as THREE from 'three';
 
-const MAXB = 14;                 // simulated wax globules
+const MAXB = 16;                 // simulated wax globules
 const NBAKED = 4;                // original shapes
-const RES_SCALE = 0.5;           // raymarch resolution relative to the canvas
+const RES_SCALE = 0.4;           // field buffer resolution relative to CSS px
+const T = 0.25;                  // surface threshold of the field
 
 // site palette (sampled from the original hero / globules), cyclic
 const PALETTE = ['#ffb52a', '#ff9304', '#f15265', '#d535d3', '#b731fa', '#7353ff', '#3d77ff', '#078eff', '#00dcff'];
 
-const VERT = /* glsl */`
-out vec2 vUv;
-void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
-
-const FRAG = /* glsl */`
-precision highp float;
-precision highp sampler3D;
-in vec2 vUv;
-out vec4 outColor;
-
-#define MAXB ${MAXB}
-#define NB ${NBAKED}
-
-uniform vec2 uView;            // viewport size in CSS px
-uniform float uTime;
-uniform float uK;              // smooth-union radius (px)
-uniform float uNoiseAmp;       // surface wobble (px)
-uniform float uZTop;
-uniform int uCount;
-uniform vec4 uBall[MAXB];      // xyz centre, radius
-uniform vec4 uBallB[MAXB];     // stretchY, colour seed, colour dir angle, unused
-uniform vec4 uBk[NB];          // x, y, scale, morph (0 = original shape, 1 = round wax)
-uniform mat3 uBkRot[NB];       // world → local rotation
-uniform vec3 uBkMin[NB];
-uniform vec3 uBkMax[NB];
-uniform vec4 uBkInfo[NB];      // range, rEq (local px), visible, colour seed
-uniform vec2 uBkSize[NB];      // bbox w, h (local px) for colour lookup
-uniform sampler3D uSdf;
-uniform sampler2D uColor;
+const PALETTE_GLSL = /* glsl */`
 uniform vec3 uPal[9];
-
-vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec4 permute(vec4 x){return mod289(((x*34.0)+10.0)*x);}
-vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
-float snoise(vec3 v){
-  const vec2 C=vec2(1.0/6.0,1.0/3.0); const vec4 D=vec4(0.0,0.5,1.0,2.0);
-  vec3 i=floor(v+dot(v,C.yyy)); vec3 x0=v-i+dot(i,C.xxx);
-  vec3 g=step(x0.yzx,x0.xyz); vec3 l=1.0-g; vec3 i1=min(g.xyz,l.zxy); vec3 i2=max(g.xyz,l.zxy);
-  vec3 x1=x0-i1+C.xxx; vec3 x2=x0-i2+C.yyy; vec3 x3=x0-D.yyy;
-  i=mod289(i);
-  vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
-  float n_=0.142857142857; vec3 ns=n_*D.wyz-D.xzx;
-  vec4 j=p-49.0*floor(p*ns.z*ns.z); vec4 x_=floor(j*ns.z); vec4 y_=floor(j-7.0*x_);
-  vec4 x=x_*ns.x+ns.yyyy; vec4 y=y_*ns.x+ns.yyyy; vec4 h=1.0-abs(x)-abs(y);
-  vec4 b0=vec4(x.xy,y.xy); vec4 b1=vec4(x.zw,y.zw);
-  vec4 s0=floor(b0)*2.0+1.0; vec4 s1=floor(b1)*2.0+1.0; vec4 sh=-step(h,vec4(0.0));
-  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy; vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
-  vec3 p0=vec3(a0.xy,h.x); vec3 p1=vec3(a0.zw,h.y); vec3 p2=vec3(a1.xy,h.z); vec3 p3=vec3(a1.zw,h.w);
-  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
-  p0*=norm.x; p1*=norm.y; p2*=norm.z; p3*=norm.w;
-  vec4 m=max(0.5-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0); m=m*m;
-  return 105.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
-}
-
 vec3 palette(float t) {      // cyclic: … cyan → back to amber, no hard wrap
   t = fract(t) * 9.0;
   int i = int(floor(t));
@@ -82,255 +31,288 @@ vec3 palette(float t) {      // cyclic: … cyan → back to amber, no hard wrap
   vec3 a = uPal[0], b = uPal[1];
   for (int k = 0; k < 9; k++) { if (k == i) { a = uPal[k]; b = uPal[k == 8 ? 0 : k + 1]; } }
   return mix(a, b, f);
-}
+}`;
 
-float sdEllipsoid(vec3 p, vec3 r) {
-  float k0 = length(p / r);
-  float k1 = length(p / (r * r));
-  return k0 * (k0 - 1.0) / max(k1, 1e-4);
-}
+const COMMON_GLSL = /* glsl */`
+precision highp float;
+uniform vec2 uView;
+uniform float uTime;
+uniform float uWob;          // wobble amplitude (px)
+uniform sampler2D uNoise;    // tiling smooth noise (pre-generated)
+vec2 wobble(vec2 world) {
+  vec2 p = world / uView.y * 0.7;
+  vec2 n = texture(uNoise, p * 0.9 + vec2(0.013 * uTime, -0.021 * uTime)).rg
+         + texture(uNoise, p * 1.7 + vec2(-0.017 * uTime, -0.011 * uTime)).gr * 0.5;
+  return (n / 1.5 - 0.5) * 2.0 * uWob;
+}`;
 
-// one original globule: baked SDF blended toward a round wax ball as it "melts"
-float bakedDist(int b, vec3 p, out vec3 lp) {
-  vec4 bk = uBk[b];
-  lp = uBkRot[b] * (p - vec3(bk.xy, 0.0)) / bk.z;
-  vec3 mn = uBkMin[b], mx = uBkMax[b];
-  vec3 uvw = (lp - mn) / (mx - mn);
-  vec3 c = clamp(uvw, vec3(0.5 / 96.0, 0.5 / 96.0, 0.5 / 80.0), vec3(1.0 - 0.5 / 96.0, 1.0 - 0.5 / 96.0, 1.0 - 0.5 / 80.0));
-  float s = texture(uSdf, vec3((float(b) + c.x) / float(NB), c.y, c.z)).r * 2.0 - 1.0;
-  float range = uBkInfo[b].x;
-  float d = sign(s) * s * s * range;   // stored as sqrt for precision near the surface
-  vec3 half_ = (mx - mn) * 0.5;
-  vec3 q = abs(lp - (mn + mx) * 0.5) - half_;
-  d += length(max(q, 0.0));
-  float dBall = length(lp) - uBkInfo[b].y;
-  d = mix(d, dBall, bk.w);
-  return d * bk.z;
-}
-
-vec3 ballColor(int i, vec3 p) {
-  vec4 B = uBall[i]; vec4 X = uBallB[i];
-  vec3 dir = vec3(cos(X.z), sin(X.z), 0.35);
-  vec3 rel = (p - B.xyz) / max(B.w, 1.0);
-  return palette(X.y + 0.3 * dot(rel, dir) + 0.08 * rel.z);
-}
-
-vec3 bakedColor(int b, vec3 lp, vec3 p) {
-  vec2 sz = uBkSize[b];
-  vec2 uv = clamp(lp.xy / sz + 0.5, 0.002, 0.998);
-  vec3 tex = texture(uColor, vec2((float(b) + uv.x) / float(NB), uv.y)).rgb;
-  vec3 wax = palette(uBkInfo[b].w + 0.3 * dot(lp / max(uBkInfo[b].y, 1.0), vec3(0.7, 0.7, 0.3)));
-  return mix(tex, wax, smoothstep(0.02, 0.45, uBk[b].w));
-}
-
-int gMask;   // per-pixel set of globules near this ray
-
-float smin(float a, float b, float k, out float h) {
-  h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-  return mix(b, a, h) - k * h * (1.0 - h);
-}
-
-float wobble(vec3 p) {
-  return uNoiseAmp * snoise(p * (1.6 / uView.y) + vec3(0.0, -uTime * 0.12, uTime * 0.07));
-}
-
-float map(vec3 p) {
-  float d = 1e5, h;
-  vec3 lp;
-  for (int b = 0; b < NB; b++) {
-    if ((gMask & (1 << (MAXB + b))) == 0) continue;
-    d = smin(bakedDist(b, p, lp), d, uK, h);
-  }
-  for (int i = 0; i < MAXB; i++) {
-    if (i >= uCount) break;
-    if ((gMask & (1 << i)) == 0) continue;
-    vec4 B = uBall[i]; float st = uBallB[i].x;
-    vec3 r = vec3(B.w / sqrt(st), B.w * st, B.w / sqrt(st));
-    d = smin(sdEllipsoid(p - B.xyz, r), d, uK, h);
-  }
-  return d + wobble(p);
-}
-
-vec3 mapColor(vec3 p) {
-  float d = 1e5, h; vec3 col = vec3(0.0); vec3 lp;
-  for (int b = 0; b < NB; b++) {
-    if ((gMask & (1 << (MAXB + b))) == 0) continue;
-    float db = bakedDist(b, p, lp);
-    vec3 cb = bakedColor(b, lp, p);
-    d = smin(db, d, uK, h);
-    col = mix(col, cb, h);
-  }
-  for (int i = 0; i < MAXB; i++) {
-    if (i >= uCount) break;
-    if ((gMask & (1 << i)) == 0) continue;
-    vec4 B = uBall[i]; float st = uBallB[i].x;
-    vec3 r = vec3(B.w / sqrt(st), B.w * st, B.w / sqrt(st));
-    float di = sdEllipsoid(p - B.xyz, r);
-    d = smin(di, d, uK, h);
-    col = mix(col, ballColor(i, p), h);
-  }
-  return col;
-}
-
+// ---- wax globules: instanced quads, procedural falloff A·(1-x²)² ----
+const BALL_VERT = /* glsl */`
+precision highp float;
+in vec3 position;
+in vec4 iA;   // x, y, Rx, Ry (field radius, px)
+in vec4 iB;   // colour seed, colour direction, amplitude, weight
+uniform vec2 uView;
+out vec2 vQ; out vec2 vWorld; flat out vec4 vB; flat out vec2 vR;
 void main() {
-  vec2 px = (vUv - 0.5) * uView;      // CSS px, origin centre, y up
-  // which globules can touch this ray (2D bounds), so the march only evaluates those
-  gMask = 0;
-  float reach = uK * 1.6 + uNoiseAmp * 1.5;
-  for (int i = 0; i < MAXB; i++) {
-    if (i >= uCount) break;
-    vec4 B = uBall[i]; float st = uBallB[i].x;
-    float rr = B.w * max(st, 1.0 / sqrt(st)) + reach;
-    if (length(px - B.xy) < rr) gMask |= (1 << i);
-  }
-  for (int b = 0; b < NB; b++) {
-    if (uBkInfo[b].z < 0.5) continue;
-    vec3 half_ = (uBkMax[b] - uBkMin[b]) * 0.5;
-    float rr = length(half_.xy) * uBk[b].z + reach;
-    if (length(px - uBk[b].xy) < rr) gMask |= (1 << (MAXB + b));
-  }
-  if (gMask == 0) { outColor = vec4(0.0); return; }
+  vec2 q = position.xy * 1.3;                 // margin for the wobble
+  vec2 world = iA.xy + q * iA.zw;
+  vQ = q; vWorld = world; vB = iB; vR = iA.zw;
+  gl_Position = vec4(world / (uView * 0.5), 0.0, 1.0);
+}`;
+const BALL_FRAG = /* glsl */`
+${COMMON_GLSL}
+${PALETTE_GLSL}
+in vec2 vQ; in vec2 vWorld; flat in vec4 vB; flat in vec2 vR;
+out vec4 outColor;
+void main() {
+  vec2 q = vQ + wobble(vWorld) / vR;
+  float x2 = dot(q, q);
+  if (x2 >= 1.0) discard;
+  float k = 1.0 - x2;
+  float F = vB.z * k * k * vB.w;
+  vec3 col = palette(vB.x + 0.3 * dot(q, vec2(cos(vB.y), sin(vB.y))));
+  outColor = vec4(col * F, F);
+}`;
 
-  vec3 ro = vec3(px, uZTop);
-  vec3 rd = vec3(0.0, 0.0, -1.0);
-  float t = 0.0, minD = 1e5;
-  bool hit = false;
-  float pixel = 1.0 / ${RES_SCALE.toFixed(2)};
-  for (int s = 0; s < 72; s++) {
-    vec3 p = ro + rd * t;
-    float d = map(p);
-    minD = min(minD, d);
-    if (d < 0.4) { hit = true; break; }
-    t += d * 0.85;
-    if (t > uZTop * 2.0) break;
-  }
-  if (!hit) {
-    // soft silhouette edge from the closest approach
-    float a = 1.0 - smoothstep(0.0, pixel * 1.5, minD);
-    if (a <= 0.0) { outColor = vec4(0.0); return; }
-    t = uZTop; // fall through using the closest region's colour
-  }
-  vec3 p = ro + rd * t;
-  const vec2 e = vec2(1.0, -1.0) * 3.5;  // wide normal stencil = smooth shading
-  vec3 n = normalize(e.xyy * map(p + e.xyy) + e.yyx * map(p + e.yyx) + e.yxy * map(p + e.yxy) + e.xxx * map(p + e.xxx));
-  if (!hit) n = vec3(0.0, 0.0, 1.0);
-  vec3 base = mapColor(p);
+// ---- the four originals: pre-rendered 16-bit field sprites + colour atlas ----
+const BAKED_VERT = /* glsl */`
+precision highp float;
+in vec3 position;
+in vec2 uv;
+uniform vec2 uView;
+uniform vec4 uC;      // x, y, scale, angle
+uniform vec4 uBox;    // field box in local px: x0, y0, x1, y1
+out vec2 vLocal; out vec2 vWorld;
+void main() {
+  vec2 local = mix(uBox.xy, uBox.zw, uv);
+  float c = cos(uC.w), s = sin(uC.w);
+  vec2 world = uC.xy + mat2(c, s, -s, c) * local * uC.z;
+  vLocal = local; vWorld = world;
+  gl_Position = vec4(world / (uView * 0.5), 0.0, 1.0);
+}`;
+const BAKED_FRAG = /* glsl */`
+${COMMON_GLSL}
+uniform sampler2D uField;  // RG = 16-bit field, row 0 = bottom
+uniform sampler2D uColor;  // atlas: 4 blobs side by side
+uniform vec4 uBox;
+uniform vec4 uC;
+uniform vec2 uSize;        // blob bbox w, h (local px)
+uniform float uIdx;
+uniform float uAmp;        // dome amplitude (taller for bigger globules)
+uniform float uWeight;     // fades out as it melts into wax
+in vec2 vLocal; in vec2 vWorld;
+out vec4 outColor;
+float fieldAt(ivec2 p, ivec2 sz) {
+  vec2 rg = texelFetch(uField, clamp(p, ivec2(0), sz - 1), 0).rg;
+  return (rg.r * 65280.0 + rg.g * 255.0) / 65535.0;
+}
+void main() {
+  vec2 local = vLocal + wobble(vWorld) / uC.z;
+  ivec2 sz = textureSize(uField, 0);
+  vec2 f = (local - uBox.xy) / (uBox.zw - uBox.xy) * vec2(sz) - 0.5;   // manual bilinear (16-bit decode)
+  ivec2 i0 = ivec2(floor(f)); vec2 w = fract(f);
+  float F = mix(mix(fieldAt(i0, sz), fieldAt(i0 + ivec2(1, 0), sz), w.x),
+                mix(fieldAt(i0 + ivec2(0, 1), sz), fieldAt(i0 + ivec2(1, 1), sz), w.x), w.y);
+  // taller dome for bigger globules, eased in so the field has no kink at the edge
+  float g = mix(1.0, (uAmp - ${T.toFixed(2)}) / ${(1 - T).toFixed(2)}, smoothstep(0.0, 0.35, F - ${T.toFixed(2)}));
+  if (F > ${T.toFixed(2)}) F = ${T.toFixed(2)} + (F - ${T.toFixed(2)}) * g;
+  F *= uWeight;
+  if (F <= 0.0) discard;
+  vec2 cuv = clamp(local / uSize + 0.5, 0.002, 0.998);
+  vec3 col = texture(uColor, vec2((uIdx + cuv.x) / 4.0, cuv.y)).rgb;
+  outColor = vec4(col * F, F);
+}`;
 
+// ---- full-resolution pass: threshold + shade ----
+const COMP_VERT = /* glsl */`
+precision highp float;
+in vec3 position; in vec2 uv;
+out vec2 vUv;
+void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+const COMP_FRAG = /* glsl */`
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform sampler2D uTex;
+uniform vec2 uTexel;       // 1 / field buffer size
+uniform float uPxPerTexel; // CSS px per field texel
+uniform float uHs;         // height scale (px)
+float hOf(float F) { return sqrt(max(F - ${T.toFixed(2)}, 0.0) / ${(1 - T).toFixed(2)}); }
+// bicubic B-spline from 4 bilinear taps: smooth outlines from the low-res field
+vec4 bicubic(vec2 uv) {
+  vec2 tsz = 1.0 / uTexel;
+  vec2 st = uv * tsz - 0.5;
+  vec2 i = floor(st), f = st - i;
+  vec2 f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+  vec2 w3 = f3 / 6.0;
+  vec2 s0 = w0 + w1, s1 = w2 + w3;
+  vec2 c0 = (i - 0.5 + w1 / s0) * uTexel, c1 = (i + 1.5 + w3 / s1) * uTexel;
+  return mix(mix(texture(uTex, vec2(c0.x, c0.y)), texture(uTex, vec2(c1.x, c0.y)), s1.x / (s0.x + s1.x)),
+             mix(texture(uTex, vec2(c0.x, c1.y)), texture(uTex, vec2(c1.x, c1.y)), s1.x / (s0.x + s1.x)),
+             s1.y / (s0.y + s1.y));
+}
+void main() {
+  vec4 s0 = texture(uTex, vUv);
+  if (s0.a < ${(T * 0.5).toFixed(3)}) { outColor = vec4(0.0); return; }   // cheap early-out away from globules
+  vec4 s = bicubic(vUv);
+  float F = s.a;
+  float e = fwidth(F) * 0.8 + 1e-4;
+  float a = smoothstep(${T.toFixed(2)} - e, ${T.toFixed(2)} + e, F);
+  if (a <= 0.0) { outColor = vec4(0.0); return; }
+  vec3 base = s.rgb / max(F, 1e-4);
+  float hl = hOf(texture(uTex, vUv - vec2(uTexel.x, 0.0)).a), hr = hOf(texture(uTex, vUv + vec2(uTexel.x, 0.0)).a);
+  float hd = hOf(texture(uTex, vUv - vec2(0.0, uTexel.y)).a), hu = hOf(texture(uTex, vUv + vec2(0.0, uTexel.y)).a);
+  float k = uHs / (2.0 * uPxPerTexel);
+  vec3 n = normalize(vec3(-(hr - hl) * k, -(hu - hd) * k, 1.0));
   // matte shading, same light as the rest of the hero
   vec3 L = normalize(vec3(-0.6, 0.8, 1.0));
   float diff = max(dot(n, L), 0.0);
   float rim = pow(1.0 - max(n.z, 0.0), 3.0);
   vec3 col = base * (0.62 + 0.48 * diff) + rim * 0.22 * vec3(1.0, 0.92, 0.7);
-  float alpha = hit ? 1.0 : 1.0 - smoothstep(0.0, pixel * 1.5, minD);
-  outColor = vec4(col, alpha);
+  outColor = vec4(col, a);
 }`;
-
-const COMPOSITE_FRAG = /* glsl */`
-precision highp float;
-in vec2 vUv;
-out vec4 outColor;
-uniform sampler2D uTex;
-void main() { outColor = texture(uTex, vUv); }`;
 
 function loadImage(url) {
   return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
 }
 
+// tiling smooth value noise (RG), generated once at start-up
+function makeNoiseTexture(size = 128, cells = 8) {
+  const data = new Uint8Array(size * size * 4);
+  const lat = [0, 1].map(() => Array.from({ length: cells * cells }, () => Math.random()));
+  const lat2 = [0, 1].map(() => Array.from({ length: cells * 2 * cells * 2 }, () => Math.random()));
+  const fade = (t) => t * t * (3 - 2 * t);
+  const sample = (L, n, x, y) => {
+    const x0 = Math.floor(x), y0 = Math.floor(y), fx = fade(x - x0), fy = fade(y - y0);
+    const g = (i, j) => L[((j % n + n) % n) * n + ((i % n + n) % n)];
+    return (g(x0, y0) * (1 - fx) + g(x0 + 1, y0) * fx) * (1 - fy) + (g(x0, y0 + 1) * (1 - fx) + g(x0 + 1, y0 + 1) * fx) * fy;
+  };
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      for (let c = 0; c < 2; c++) {
+        const v = sample(lat[c], cells, (x / size) * cells, (y / size) * cells) * 0.7 +
+                  sample(lat2[c], cells * 2, (x / size) * cells * 2, (y / size) * cells * 2) * 0.3;
+        data[(y * size + x) * 4 + c] = Math.round(v * 255);
+      }
+      data[(y * size + x) * 4 + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export async function createLava(renderer, baseUrl, { reduceMotion = false } = {}) {
   const meta = await fetch(new URL('blobs.json', baseUrl)).then((r) => r.json());
   const baked = meta.blobs.slice(0, NBAKED);
-  const [GX, GY, GZ] = baked[0].grid;
-
-  // ---- baked SDF volumes → one 3D texture (blobs side by side along x) ----
-  const imgs = await Promise.all(baked.map((b) => loadImage(new URL(`sdf_${b.name}.png`, baseUrl).href)));
-  const vol = new Uint8Array(GX * NBAKED * GY * GZ);
-  const cv = document.createElement('canvas');
-  const cx = cv.getContext('2d', { willReadFrequently: true });
-  imgs.forEach((img, b) => {
-    cv.width = img.width; cv.height = img.height;
-    cx.drawImage(img, 0, 0);
-    const px = cx.getImageData(0, 0, img.width, img.height).data;
-    for (let z = 0; z < GZ; z++) {
-      const tr = Math.floor(z / 8), tc = z % 8;
-      for (let y = 0; y < GY; y++) {
-        for (let x = 0; x < GX; x++) {
-          const sx = tc * GX + x, sy = tr * GY + y;
-          vol[(z * GY + y) * GX * NBAKED + b * GX + x] = px[(sy * img.width + sx) * 4];
-        }
-      }
-    }
-  });
-  const sdfTex = new THREE.Data3DTexture(vol, GX * NBAKED, GY, GZ);
-  sdfTex.format = THREE.RedFormat;
-  sdfTex.type = THREE.UnsignedByteType;
-  sdfTex.minFilter = sdfTex.magFilter = THREE.LinearFilter;
-  sdfTex.wrapS = sdfTex.wrapT = sdfTex.wrapR = THREE.ClampToEdgeWrapping;
-  sdfTex.unpackAlignment = 1;
-  sdfTex.needsUpdate = true;
-
-  const colorTex = await new THREE.TextureLoader().loadAsync(new URL('blob_color_atlas.webp', baseUrl).href);
+  const texLoader = new THREE.TextureLoader();
+  const [fieldTexs, colorTex] = await Promise.all([
+    Promise.all(baked.map(async (b) => {
+      const t = await texLoader.loadAsync(new URL(`field_${b.name}.png`, baseUrl).href);
+      t.flipY = false;                       // PNG row 0 is already the bottom
+      t.colorSpace = THREE.NoColorSpace;
+      t.minFilter = t.magFilter = THREE.NearestFilter; // decoded + filtered by hand
+      t.generateMipmaps = false;
+      t.needsUpdate = true;
+      return t;
+    })),
+    texLoader.loadAsync(new URL('blob_color_atlas.webp', baseUrl).href)
+  ]);
   colorTex.colorSpace = THREE.NoColorSpace; // shade in display space, written out as-is
   colorTex.minFilter = THREE.LinearFilter;
   colorTex.generateMipmaps = false;
 
-  // ---- materials ----
-  const uniforms = {
+  const shared = {
     uView: { value: new THREE.Vector2(1, 1) },
     uTime: { value: 0 },
-    uK: { value: 60 },
-    uNoiseAmp: { value: 0 },
-    uZTop: { value: 1000 },
-    uCount: { value: 0 },
-    uBall: { value: Array.from({ length: MAXB }, () => new THREE.Vector4()) },
-    uBallB: { value: Array.from({ length: MAXB }, () => new THREE.Vector4(1, 0, 0, 0)) },
-    uBk: { value: Array.from({ length: NBAKED }, () => new THREE.Vector4()) },
-    uBkRot: { value: Array.from({ length: NBAKED }, () => new THREE.Matrix3()) },
-    uBkMin: { value: baked.map((b) => new THREE.Vector3(b.box[0], b.box[1], b.box[2])) },
-    uBkMax: { value: baked.map((b) => new THREE.Vector3(b.box[3], b.box[4], b.box[5])) },
-    uBkInfo: { value: baked.map((b, i) => new THREE.Vector4(b.range, b.rEq, 1, 0.1 + i * 0.23)) },
-    uBkSize: { value: baked.map((b) => new THREE.Vector2(b.w, b.h)) },
-    uSdf: { value: sdfTex },
-    uColor: { value: colorTex },
+    uWob: { value: 0 },
+    uNoise: { value: makeNoiseTexture() },
     uPal: { value: PALETTE.map((c) => new THREE.Color(c)).map((c) => new THREE.Vector3(...c.convertLinearToSRGB().toArray())) }
   };
-  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3, vertexShader: 'in vec3 position; in vec2 uv;\n' + VERT, fragmentShader: FRAG, uniforms,
-    depthTest: false, depthWrite: false
-  }));
-  quad.frustumCulled = false;
-  const lavaScene = new THREE.Scene(); lavaScene.add(quad);
-  const compMat = new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3, vertexShader: 'in vec3 position; in vec2 uv;\n' + VERT, fragmentShader: COMPOSITE_FRAG,
-    uniforms: { uTex: { value: null } }, transparent: true, depthTest: false, depthWrite: false,
+  const additive = {
+    glslVersion: THREE.GLSL3, transparent: true, depthTest: false, depthWrite: false,
+    blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneFactor
+  };
+
+  // wax globules: one instanced draw
+  const quadGeo = new THREE.PlaneGeometry(2, 2);
+  const ballGeo = new THREE.InstancedBufferGeometry();
+  ballGeo.index = quadGeo.index;
+  ballGeo.setAttribute('position', quadGeo.getAttribute('position'));
+  const iA = new THREE.InstancedBufferAttribute(new Float32Array(MAXB * 4), 4);
+  const iB = new THREE.InstancedBufferAttribute(new Float32Array(MAXB * 4), 4);
+  iA.setUsage(THREE.DynamicDrawUsage); iB.setUsage(THREE.DynamicDrawUsage);
+  ballGeo.setAttribute('iA', iA); ballGeo.setAttribute('iB', iB);
+  ballGeo.instanceCount = 0;
+  const ballMesh = new THREE.Mesh(ballGeo, new THREE.RawShaderMaterial({ ...additive, vertexShader: BALL_VERT, fragmentShader: BALL_FRAG, uniforms: shared }));
+  ballMesh.frustumCulled = false;
+
+  // originals: one quad each
+  const bakedMeshes = baked.map((b, i) => {
+    const mat = new THREE.RawShaderMaterial({
+      ...additive, vertexShader: BAKED_VERT, fragmentShader: BAKED_FRAG,
+      uniforms: {
+        ...shared,
+        uField: { value: fieldTexs[i] }, uColor: { value: colorTex },
+        uBox: { value: new THREE.Vector4(b.field.x0, b.field.y0, b.field.x1, b.field.y1) },
+        uC: { value: new THREE.Vector4() }, uSize: { value: new THREE.Vector2(b.w, b.h) },
+        uIdx: { value: i }, uAmp: { value: 1 }, uWeight: { value: 1 }
+      }
+    });
+    const m = new THREE.Mesh(quadGeo, mat);
+    m.frustumCulled = false;
+    return m;
+  });
+
+  const fieldScene = new THREE.Scene();
+  bakedMeshes.forEach((m) => fieldScene.add(m));
+  fieldScene.add(ballMesh);
+
+  const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+  rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter;
+  rt.texture.generateMipmaps = false;
+  const compUniforms = {
+    uTex: { value: rt.texture }, uTexel: { value: new THREE.Vector2() },
+    uPxPerTexel: { value: 1 }, uHs: { value: 60 }
+  };
+  const comp = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, vertexShader: COMP_VERT, fragmentShader: COMP_FRAG, uniforms: compUniforms,
+    transparent: true, depthTest: false, depthWrite: false,
     blending: THREE.CustomBlending, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor
-  });
-  const comp = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), compMat);
+  }));
   comp.frustumCulled = false;
   const compScene = new THREE.Scene(); compScene.add(comp);
   const cam = new THREE.Camera();
-  const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.UnsignedByteType, depthBuffer: false });
-  rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter;
-  compMat.uniforms.uTex.value = rt.texture;
 
   // ---- simulation state ----
   let vw = 1, vh = 1;
   const balls = [];
   const bk = baked.map((b, i) => ({
     meta: b, x: 0, y: 0, s: 1, grow: 1, morph: 0, released: false, alive: true,
-    vx: 0, vy: 0, temp: 0.55, rot: new THREE.Euler(), spin: [0, 0, 0], phase: i * 1.7 + 0.4,
+    vx: 0, vy: 0, temp: 0.55, angle: 0, phase: i * 1.7 + 0.4,
     releaseAt: [4, 9, 6.5, 11.5][i] ?? 6 + i * 2.5
   }));
   let nextSpawn = 14, seedCounter = 0.37;
   const rnd = (a, b) => a + Math.random() * (b - a);
-  const volOf = (r) => r * r * r;           // ∝ volume (constant factor cancels)
-  const radOf = (v) => Math.cbrt(Math.max(v, 0));
+  const volOf = (r) => r * r;               // 2D: area ∝ r² (constant factor cancels)
+  const radOf = (v) => Math.sqrt(Math.max(v, 0));
+  // dome amplitude grows with size so big globules look as round as small ones
+  const ampOf = (r) => 1 + (r / (vh * 0.07)) ** 2;
+  // field radius that puts the threshold (the visible edge) at r for amplitude A
+  const fieldR = (r, A) => r / Math.sqrt(1 - Math.sqrt(T / A));
 
-  function layout(w, h, dpr) {
+  function layout(w, h) {
     const first = vw === 1;
     vw = w; vh = h;
-    uniforms.uView.value.set(vw, vh);
-    uniforms.uK.value = vh * 0.075;
+    shared.uView.value.set(vw, vh);
     // originals: same placement as before (old wallpaper, corner-anchored on narrow screens)
     const iw = meta.imageW, ih = meta.imageH;
     const s = Math.min(Math.max(vw / iw, vh / ih), (vw / iw) * (vw < vh ? 1.3 : 1.7));
@@ -349,7 +331,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
     if (balls.length >= MAXB) return;
     const r = vh * rnd(0.04, 0.085);
     balls.push({
-      x: rnd(-0.42, 0.42) * vw, y: fromBottom ? -vh / 2 - r * 1.4 : rnd(-0.5, 0.5) * vh, z: rnd(-0.1, 0.1) * vh,
+      x: rnd(-0.42, 0.42) * vw, y: fromBottom ? -vh / 2 - r * 1.4 : rnd(-0.5, 0.5) * vh,
       r, vx: 0, vy: vh * 0.02, temp: 1, st: 1, seed: (seedCounter = (seedCounter + 0.382) % 1), dirA: rnd(0, 6.283),
       noMergeUntil: 0, absorbInto: null, feed: null, light: Math.random() < 0.4
     });
@@ -368,21 +350,20 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
         // gentle idle float while still in the opening composition
         b.x = b.homeX + Math.sin(t * 0.4 + b.phase) * 6;
         b.y = b.homeY + Math.sin(t * 0.55 + b.phase) * 9;
-        b.rot.set(Math.sin(t * 0.3 + b.phase) * 0.07, Math.cos(t * 0.25 + b.phase) * 0.09, 0);
+        b.angle = Math.sin(t * 0.3 + b.phase) * 0.035;
         if (t > b.releaseAt) b.released = true;
         continue;
       }
       b.morph = Math.min(1, b.morph + dt / 11);
-      physics(b, dt, H, b.meta.rEq * b.s * b.grow);
-      b.rot.x += Math.sin(t * 0.13 + b.phase) * 0.05 * dt;
-      b.rot.y += Math.cos(t * 0.11 + b.phase) * 0.08 * dt;
+      physics(b, dt, H, b.meta.r2d * b.s * b.grow);
+      b.angle += Math.sin(t * 0.13 + b.phase) * 0.05 * dt;
       // fully melted → hand over to the regular wax simulation
       if (b.morph >= 1 && balls.length < MAXB) {
         b.alive = false;
-        balls.push({ x: b.x, y: b.y, z: 0, r: b.meta.rEq * b.s * b.grow, vx: b.vx, vy: b.vy, temp: b.temp, st: 1,
+        balls.push({ x: b.x, y: b.y, r: b.meta.r2d * b.s * b.grow, vx: b.vx, vy: b.vy, temp: b.temp, st: 1,
           seed: (0.1 + bk.indexOf(b) * 0.23) % 1, dirA: 0.785, noMergeUntil: t + 3, absorbInto: null, feed: null, light: bk.indexOf(b) % 2 === 0 });
       }
-      if (b.y - b.meta.rEq * b.s > H * 0.5 + H * 0.6) b.alive = false; // floated far away
+      if (b.y - b.meta.r2d * b.s > H * 0.5 + H * 0.6) b.alive = false; // floated far away
     }
 
     // ---- wax globules ----
@@ -394,7 +375,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
         const a = balls[i], b = balls[j];
         if (a.absorbInto || b.absorbInto || a.feed === b || b.feed === a) continue;
         const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
-        const reach = a.r + b.r + uniforms.uK.value;
+        const reach = (a.r + b.r) * 1.25;
         if (d < reach && t > a.noMergeUntil && t > b.noMergeUntil) {
           const pull = H * 0.012 * (1 - d / reach);
           a.vx += (dx / d) * pull * dt * (b.r / (a.r + b.r)) * 20; a.vy += (dy / d) * pull * dt * (b.r / (a.r + b.r)) * 20;
@@ -413,7 +394,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
       const move = Math.min(volOf(s.r), vT * 0.35 * dt);
       s.r = radOf(volOf(s.r) - move); big.r = radOf(volOf(big.r) + move);
       const k = Math.min(1, dt * 1.6);
-      s.x += (big.x - s.x) * k; s.y += (big.y - s.y) * k; s.z += (big.z - s.z) * k;
+      s.x += (big.x - s.x) * k; s.y += (big.y - s.y) * k;
       big.vx = (big.vx * big.r + s.vx * s.r) / (big.r + s.r); big.vy = (big.vy * big.r + s.vy * s.r) / (big.r + s.r);
     }
 
@@ -428,7 +409,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
       if (a.r > H * 0.13 && Math.random() < dt * 0.16 * (a.r / (H * 0.13))) {
         const frac = rnd(0.3, 0.5), up = Math.random() < 0.6 ? 1 : -1;
         const c = {
-          x: a.x + rnd(-0.2, 0.2) * a.r, y: a.y + up * a.r * 0.3, z: a.z, r: 1, vx: rnd(-1, 1) * H * 0.01,
+          x: a.x + rnd(-0.2, 0.2) * a.r, y: a.y + up * a.r * 0.3, r: 1, vx: rnd(-1, 1) * H * 0.01,
           vy: up * H * 0.035, temp: up > 0 ? 1 : 0.1, st: 1, seed: (a.seed + rnd(0.08, 0.2)) % 1, dirA: a.dirA + 1.3,
           noMergeUntil: t + 9, absorbInto: null, feed: null, feedLeft: volOf(a.r) * frac, light: up > 0 && Math.random() < 0.5
         };
@@ -477,28 +458,33 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
   }
 
   function upload(t, pointer) {
-    const u = uniforms;
-    u.uTime.value = t;
+    shared.uTime.value = t;
     const lavaAmt = reduceMotion ? 0 : Math.min(1, Math.max(0, (t - 3) / 8));
-    u.uNoiseAmp.value = vh * 0.028 * lavaAmt;
+    shared.uWob.value = vh * 0.012 * lavaAmt;
     const px = -pointer.x * 12, py = pointer.y * 10;
-    let zTop = 10;
-    const n = Math.min(balls.length, MAXB);
-    for (let i = 0; i < n; i++) {
-      const a = balls[i];
-      u.uBall.value[i].set(a.x + px, a.y + py, a.z, a.r);
-      u.uBallB.value[i].set(a.st, a.seed, a.dirA, 0);
-      zTop = Math.max(zTop, Math.abs(a.z) + a.r * 1.4);
-    }
-    u.uCount.value = n;
+
+    // wax globules (+ the round wax each original is melting into)
+    let n = 0;
+    const put = (x, y, r, st, seed, dirA, weight) => {
+      if (n >= MAXB) return;
+      const A = ampOf(r), R = fieldR(r, A);
+      iA.setXYZW(n, x + px, y + py, R / Math.sqrt(st), R * st);
+      iB.setXYZW(n, seed, dirA, A, weight);
+      n++;
+    };
+    for (const a of balls) put(a.x, a.y, a.r, a.st, a.seed, a.dirA, 1);
     bk.forEach((b, i) => {
-      u.uBk.value[i].set(b.x + px, b.y + py, b.s * b.grow, b.morph);
-      u.uBkRot.value[i].setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(b.rot)).transpose();
-      u.uBkInfo.value[i].z = b.alive ? 1 : 0;
-      const half = (b.meta.box[5] - b.meta.box[2]) / 2;
-      if (b.alive) zTop = Math.max(zTop, Math.max(half, b.meta.box[3]) * b.s * b.grow);
+      const m = bakedMeshes[i], u = m.material.uniforms;
+      m.visible = b.alive;
+      if (!b.alive) return;
+      const r = b.meta.r2d * b.s * b.grow;
+      u.uC.value.set(b.x + px, b.y + py, b.s * b.grow, b.angle);
+      u.uAmp.value = ampOf(r);
+      u.uWeight.value = 1 - b.morph;
+      if (b.morph > 0) put(b.x, b.y, r, 1, (0.1 + i * 0.23) % 1, 0.785, b.morph);
     });
-    u.uZTop.value = zTop + u.uK.value + u.uNoiseAmp.value * 2;
+    ballGeo.instanceCount = n;
+    iA.needsUpdate = true; iB.needsUpdate = true;
   }
 
   // the lava keeps its own clock so a slow frame never skips physics
@@ -513,20 +499,24 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
     }
   }
 
-  // adaptive resolution: drop the raymarch resolution on slow GPUs, raise it back when fast
-  let quality = 1, slowAcc = 0, fastAcc = 0, lastDpr = 1;
+  // adaptive resolution of the field buffer (the full-res pass is already cheap)
+  let quality = 1, slowAcc = 0, fastAcc = 0;
   function adapt(frameMs) {
-    if (frameMs > 26) { slowAcc += frameMs; fastAcc = 0; } else if (frameMs < 14) { fastAcc += frameMs; slowAcc = 0; }
+    if (frameMs > 22) { slowAcc += frameMs; fastAcc = 0; } else if (frameMs < 14) { fastAcc += frameMs; slowAcc = 0; }
     if (slowAcc > 1500 && quality > 0.5) { quality = Math.max(0.5, quality * 0.8); slowAcc = 0; resizeRT(); }
     if (fastAcc > 4000 && quality < 1) { quality = Math.min(1, quality / 0.8); fastAcc = 0; resizeRT(); }
   }
   function resizeRT() {
-    const k = RES_SCALE * Math.min(lastDpr, 1.5) * quality;
-    rt.setSize(Math.max(1, Math.round(vw * k)), Math.max(1, Math.round(vh * k)));
+    const k = RES_SCALE * quality;
+    const w = Math.max(1, Math.round(vw * k)), h = Math.max(1, Math.round(vh * k));
+    rt.setSize(w, h);
+    compUniforms.uTexel.value.set(1 / w, 1 / h);
+    compUniforms.uPxPerTexel.value = vw / w;
+    compUniforms.uHs.value = vh * 0.07;
   }
 
   return {
-    layout(w, h, dpr) { lastDpr = dpr; layout(w, h, dpr); resizeRT(); },
+    layout(w, h) { layout(w, h); resizeRT(); },
     update(dt, scrollDelta, pointer, frameMs = 16) {
       if (!reduceMotion) advance(Math.min(dt, 0.25), scrollDelta);
       upload(simT, pointer);
@@ -536,7 +526,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
       renderer.setRenderTarget(rt);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
-      renderer.render(lavaScene, cam);
+      renderer.render(fieldScene, cam);
       renderer.setRenderTarget(null);
       renderer.render(compScene, cam);
     },

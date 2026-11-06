@@ -1,13 +1,13 @@
-# Rebuild the four hero globules as closed, seamless 3D blobs.
+# Pre-render the four hero globules for the lava lamp (js/lava.js).
 # 1. segment each blob from the old wallpaper
 # 2. blobs cropped by the wallpaper frame get their silhouette completed with a smooth
 #    tangent-continuous curve (so they're whole blobs, not cut-off slabs)
-# 3. inflate the silhouette into a 3D occupancy volume, blur it, marching-cubes it,
-#    then Taubin-smooth → one watertight surface with no rim seam
-# 4. colour texture: cleaned wallpaper colours, extended (inpainted) into the completed parts
+# 3. pre-render a 16-bit metaball field sprite: Poisson "balloon" dome inside the silhouette,
+#    soft falloff outside (field_*.png, R = high byte, G = low byte)
+# 4. colour: cleaned wallpaper colours, extended (inpainted) into the completed parts,
+#    packed into blob_color_atlas.webp
 import numpy as np, cv2, json, struct, sys
 from scipy import ndimage, sparse
-from skimage import measure
 from PIL import Image
 
 import os
@@ -65,7 +65,7 @@ def complete_silhouette(mask_full):
     closed = np.stack([ndimage.gaussian_filter1d(closed[:, i], sig, mode='wrap') for i in range(2)], 1)
     return closed
 
-def taubin(V, F, iters=12, lam=0.5, mu=-0.53):
+def _unused_taubin(V, F, iters=12, lam=0.5, mu=-0.53):
     nV = len(V)
     i = np.r_[F[:, 0], F[:, 1], F[:, 2], F[:, 1], F[:, 2], F[:, 0]]
     j = np.r_[F[:, 1], F[:, 2], F[:, 0], F[:, 0], F[:, 1], F[:, 2]]
@@ -116,83 +116,63 @@ for idx in order:
     col = np.where(known[..., None] > 0, col, filled)
     TS = min(1.0, 1024 / max(bw, bh))
     tex = cv2.resize(cv2.cvtColor(col, cv2.COLOR_BGR2RGB), (int(bw * TS), int(bh * TS)), interpolation=cv2.INTER_AREA)
-    Image.fromarray(tex).save(OUT + f'blob_{name}.webp', quality=88, method=6)
+    tex_img = Image.fromarray(tex)
 
-    # ---- inflate into a volume ----
-    N = 110  # voxels on the long side
-    vs = max(bw, bh) / N  # px per voxel
-    gw, gh = int(np.ceil(bw / vs)), int(np.ceil(bh / vs))
-    s2 = cv2.resize(sil, (gw, gh), interpolation=cv2.INTER_AREA).astype(float) / 255
-    s2b = (s2 > 0.5).astype(np.uint8)
-    # balloon inflation: solve ∇²u = -1 inside the silhouette (u = 0 outside). sqrt(u) is an
-    # exact hemisphere for a disc and a round tube for a strip — smooth, with no medial ridge.
-    inside = s2b > 0
+    # ---- 2D metaball field sprite (pre-rendered) ----
+    # F = T on the silhouette; inside it rises as a Poisson "balloon" dome (sqrt(u)), outside it
+    # falls to 0 over a margin M — the same contract as the wax globules' procedural falloff,
+    # so the originals merge with them seamlessly in js/lava.js.
+    T = 0.25
+    area_px = (sil > 127).sum()
+    r2d = float(np.sqrt(area_px / np.pi))          # area-equivalent radius (local px)
+    M = 0.42 * r2d                                  # outside falloff, matches a ball's (1-x²)² skirt
+    FR = 256                                        # sprite texels on the long side
+    SS = 3                                          # supersampling for a sub-texel smooth edge
+    q = (max(bw, bh) + 2 * M) / FR                  # local px per output texel
+    EW0, EH0 = int(np.ceil((bw + 2 * M) / q)), int(np.ceil((bh + 2 * M) / q))
+    EW, EH = EW0 * SS, EH0 * SS
+    q = q / SS
+    padpx = int(np.ceil(M))
+    silp = cv2.copyMakeBorder(sil, padpx, padpx, padpx, padpx, cv2.BORDER_CONSTANT, value=0)
+    frac = cv2.resize(silp, (EW, EH), interpolation=cv2.INTER_AREA).astype(float) / 255
+    inside = frac > 0.5
     ids = -np.ones(inside.shape, int); ids[inside] = np.arange(inside.sum())
     yy, xx = np.nonzero(inside)
     rows = [np.arange(len(yy))]; cols = [np.arange(len(yy))]; vals = [np.full(len(yy), 4.0)]
     for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
         ny, nx = yy + dy, xx + dx
-        ok = (ny >= 0) & (ny < gh) & (nx >= 0) & (nx < gw)
+        ok = (ny >= 0) & (ny < EH) & (nx >= 0) & (nx < EW)
         nb = np.full(len(yy), -1); nb[ok] = ids[ny[ok], nx[ok]]
         good = nb >= 0
         rows.append(np.arange(len(yy))[good]); cols.append(nb[good]); vals.append(-np.ones(good.sum()))
     Am = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(len(yy),) * 2)
     from scipy.sparse.linalg import spsolve
     u = np.zeros(inside.shape); u[inside] = spsolve(Am.tocsc(), np.ones(len(yy)))
-    half = 1.75 * np.sqrt(np.maximum(u, 0))   # 2.0 = sphere for a disc; slightly flattened
-    zmax = int(np.ceil(half.max())) + 4
-    zs = np.arange(-zmax, zmax + 1)
-    vol = (np.abs(zs)[:, None, None] <= half[None, :, :]).astype(np.float32)
-    vol = np.pad(vol, 6)
-    vol = ndimage.gaussian_filter(vol, 2.6)
-    verts, faces, normals, _ = measure.marching_cubes(vol, 0.5, step_size=1)
-    verts -= 6
-    # vol axes: (z, y, x) → image px, centred on bbox centre; three.js y up
-    Z = (verts[:, 0] - zmax) * vs
-    Y = verts[:, 1] * vs
-    X = verts[:, 2] * vs
-    V = np.stack([X - bw / 2, -(Y - bh / 2), Z], 1)
-    F = faces[:, ::-1].copy()  # winding → outward normals in three.js
-    V = taubin(V, F, iters=40)
-    nv = len(V)
-    print(name, 'verts', nv, 'tris', len(F), 'bbox', bw, bh, 'origin', ox, oy, 'thick', round(2 * half.max() * vs))
-    # ---- signed distance volume (px), resampled to a fixed grid ----
-    inside = vol > 0.5
-    sdf_vox = ndimage.distance_transform_edt(~inside) - ndimage.distance_transform_edt(inside)
-    sdf_vox = sdf_vox - np.sign(sdf_vox) * 0.5        # EDT counts to voxel centres
-    # near the surface use the smooth field: d ≈ (0.5 - vol) / |∇vol| (sub-voxel accurate)
-    gz, gy, gx = np.gradient(vol)
-    gm = np.sqrt(gx * gx + gy * gy + gz * gz)
-    near = (0.5 - vol) / np.maximum(gm, 1e-3)
-    wnear = np.clip(1 - (np.abs(near) - 1.5) / 1.5, 0, 1) * (gm > 0.02)
-    sdf_vox = wnear * near + (1 - wnear) * sdf_vox
-    sdf_vox = ndimage.gaussian_filter(sdf_vox, 0.8)
-    sdf_px = sdf_vox * vs
-    nz, ny, nx = vol.shape
-    GX, GY, GZ = 96, 96, 80
-    zi = np.linspace(0, nz - 1, GZ); yi = np.linspace(0, ny - 1, GY); xi = np.linspace(0, nx - 1, GX)
-    Zg, Yg, Xg = np.meshgrid(zi, yi, xi, indexing='ij')
-    grid = ndimage.map_coordinates(sdf_px, [Zg, Yg, Xg], order=1)
-    RANGE = max(bw, bh) * 0.25
-    # sqrt encoding: most of the 8-bit precision sits near the surface (d = 0)
-    g = np.clip(grid / RANGE, -1, 1)
-    q8 = np.clip(np.round((np.sign(g) * np.sqrt(np.abs(g)) * 0.5 + 0.5) * 255), 0, 255).astype(np.uint8)  # (GZ, GY, GX), y down
-    q8 = q8[:, ::-1, :]  # store with y up (row 0 = bottom) to match three.js
-    tiles = np.zeros((10 * GY, 8 * GX), np.uint8)
-    for k in range(GZ):
-        r, c = divmod(k, 8)
-        tiles[r * GY:(r + 1) * GY, c * GX:(c + 1) * GX] = q8[k]
-    Image.fromarray(tiles).save(OUT + f'sdf_{name}.png', optimize=True)
-    # box of the grid in blob-local px (centred on bbox centre, y up)
-    X0 = -PADV * vs - bw / 2; X1 = X0 + (nx - 1) * vs
-    Ytop = bh / 2 + PADV * vs; Y1 = Ytop - (ny - 1) * vs   # y index 0 is top
-    Z0 = (-PADV - zmax) * vs; Z1 = Z0 + (nz - 1) * vs
-    volume_px3 = inside.sum() * vs ** 3
+    hn = np.sqrt(np.maximum(u, 0)); hn /= hn.max()
+    # sub-texel signed distance to the silhouette (texels), from the antialiased coverage
+    dout = ndimage.distance_transform_edt(~inside) - 0.5 + (0.5 - frac).clip(-0.5, 0.5) * (~inside)
+    s_px = np.maximum(dout, 0) * q
+    Fin = T + (1 - T) * hn
+    # match the outside falloff's slope to the inside slope at the edge (no kink at the
+    # threshold, so the bilinear-upsampled field gives a smooth, sub-texel outline)
+    gyi, gxi = np.gradient(Fin)
+    edge = inside & ~ndimage.binary_erosion(inside, iterations=2)
+    k_in = np.median(np.hypot(gxi, gyi)[edge]) / q          # per local px
+    M = float(np.clip(2 * T / k_in, 0.12 * r2d, 0.42 * r2d))
+    F = np.where(inside, Fin, T * np.clip(1 - s_px / M, 0, 1) ** 2)
+    F = ndimage.gaussian_filter(F, 0.5 * SS)
+    F = F.reshape(EH0, SS, EW0, SS).mean(axis=(1, 3))   # area-average down to the sprite size
+    EW, EH, q = EW0, EH0, q * SS
+    F16 = np.round(np.clip(F, 0, 1) * 65535).astype(np.uint32)[::-1]   # row 0 = bottom (y up)
+    enc = np.dstack([(F16 >> 8).astype(np.uint8), (F16 & 255).astype(np.uint8), np.zeros_like(F16, np.uint8)])
+    Image.fromarray(enc).save(OUT + f'field_{name}.png', optimize=True)
+    # equivalent wax radius when it melts (area-preserving, so it doesn't jump in size)
     meta.append(dict(name=name, x=int(ox), y=int(oy), w=int(bw), h=int(bh),
-                     box=[float(X0), float(Y1), float(Z0), float(X1), float(Ytop), float(Z1)],
-                     range=float(RANGE), grid=[GX, GY, GZ],
-                     rEq=float((3 * volume_px3 / (4 * np.pi)) ** (1 / 3))))
-    texs.append(Image.open(OUT + f'blob_{name}.webp').convert('RGB').resize((512, 512), Image.LANCZOS))
+                     field=dict(w=EW, h=EH, x0=float(-bw / 2 - padpx), y0=float(-bh / 2 - padpx),
+                                x1=float(-bw / 2 - padpx + EW * q), y1=float(-bh / 2 - padpx + EH * q)),
+                     r2d=r2d, T=T))
+    print(name, 'field', EW, EH, 'q', round(q, 2), 'r2d', round(r2d), 'M', round(M), 'k_in', k_in)
+    texs.append(tex_img.convert('RGB').resize((512, 512), Image.LANCZOS))
 
 atlas = Image.new('RGB', (512 * len(texs), 512))
 for i, t in enumerate(texs): atlas.paste(t, (i * 512, 0))

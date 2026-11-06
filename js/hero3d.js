@@ -204,7 +204,19 @@ export async function initHero(canvas, hero) {
   const params = new URLSearchParams(location.search);
   const TIME_SCALE = Number(params.get('lavaSpeed')) || 1;
   if (params.has('debug')) window.__lava = lava;
+  const PROFILE_NO_LAVA = params.has('nolava'), PROFILE_NO_TEXT = params.has('notext');
   let lastT = 0, lastScroll = 0, lastFrame = performance.now();
+
+  // Adaptive pixel ratio: phones run 3x screens; if frames run long, render the 3D layer at
+  // fewer pixels (down to 1x), and step back up when there's headroom.
+  const maxDpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = maxDpr, slowMs = 0, fastMs = 0;
+  function adaptPixelRatio(ms) {
+    if (!ms || ms > 250) return;              // ignore tab switches / hitches
+    if (ms > 20) { slowMs += ms; fastMs = 0; } else if (ms < 13) { fastMs += ms; slowMs = 0; }
+    if (slowMs > 1200 && dpr > 1) { dpr = Math.max(1, dpr - 0.25); slowMs = 0; renderer.setPixelRatio(dpr); layout(); }
+    if (fastMs > 5000 && dpr < maxDpr) { dpr = Math.min(maxDpr, dpr + 0.25); fastMs = 0; renderer.setPixelRatio(dpr); layout(); }
+  }
 
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
@@ -229,12 +241,13 @@ export async function initHero(canvas, hero) {
     const now = performance.now(), frameMs = now - lastFrame; lastFrame = now;
     const dt = Math.max(0, t - lastT); lastT = t;
     lava.update(dt, scrollOffset - lastScroll, eased, frameMs);
+    adaptPixelRatio(frameMs);
     lastScroll = scrollOffset;
 
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
-    lava.render();
-    if (text.visible) {
+    if (!PROFILE_NO_LAVA) lava.render();
+    if (text.visible && !PROFILE_NO_TEXT) {
       renderer.clearDepth();
       renderer.render(textScene, textCamera);
     }
