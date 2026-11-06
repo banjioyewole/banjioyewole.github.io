@@ -8,12 +8,22 @@
 // silhouette, so edges stay sharp at full resolution.
 import * as THREE from 'three';
 
-const NB = 4;
+const ATLAS_TILES = 4;     // baked shapes
 const RES_SCALE = 0.5;     // shader resolution relative to the canvas
 const LIGHT = 0.2;         // how strongly the baked shading affects the wallpaper's colours
 const VIVID = 1.2;         // saturation boost on top of the wallpaper's colours
 // how far each blob rises per px scrolled (nearer blobs move faster) and how much it grows per screenful
 const DEPTH = { tl: { rise: 0.5, grow: 0.1 }, tr: { rise: 0.32, grow: 0.05 }, bl: { rise: 0.62, grow: 0.14 }, br: { rise: 0.24, grow: 0.03 } };
+// More globules further down the page, reusing those shapes. Each passes through the middle of the
+// screen after scrolling `at` screenfuls: x is a fraction of the width from centre, size is relative
+// to the original shape, and mirror flips it so it doesn't read as a copy.
+const FURTHER_DOWN = [
+  { shape: 'br', at: 2.5, x: -0.44, size: 1.5, rise: 0.3, mirror: true },
+  { shape: 'tr', at: 5.5, x: 0.5, size: 0.8, rise: 0.26, mirror: true },
+  { shape: 'tl', at: 7, x: -0.5, size: 0.8, rise: 0.28, mirror: false },
+  { shape: 'bl', at: 8, x: 0.5, size: 0.65, rise: 0.3, mirror: true }
+];
+const NB = ATLAS_TILES + FURTHER_DOWN.length;
 
 const VERT = /* glsl */`
 in vec3 position; in vec2 uv;
@@ -25,9 +35,11 @@ precision highp float;
 in vec2 vUv;
 out vec4 outColor;
 #define NB ${NB}
+#define ATLAS_TILES ${ATLAS_TILES}.0
 uniform vec2 uView;            // viewport size in CSS px
 uniform float uEdge;           // distances to the silhouette are stored within ±uEdge (px)
-uniform vec3 uBk[NB];          // x, y, scale
+uniform vec4 uBk[NB];          // x, y, scale, x mirror (1 or -1)
+uniform float uBkTile[NB];     // which baked shape
 uniform float uBkRange[NB];    // distances are stored as a fraction of this (local px)
 uniform vec2 uBkSize[NB];      // bbox w, h (local px)
 uniform sampler2D uSdf;
@@ -36,10 +48,10 @@ uniform vec2 uSdfInset;        // half a texel of one atlas tile, in tile uv
 uniform sampler2D uColor;
 
 float blobDist(int b, vec2 p) {
-  vec2 lp = (p - uBk[b].xy) / uBk[b].z;
+  vec2 lp = (p - uBk[b].xy) / uBk[b].z * vec2(uBk[b].w, 1.0);
   vec2 sz = uBkSize[b];
   vec2 c = clamp(lp / sz + 0.5, uSdfInset, 1.0 - uSdfInset);
-  float d = texture(uSdf, vec2((float(b) + c.x) / float(NB), c.y)).r * uBkRange[b];
+  float d = texture(uSdf, vec2((uBkTile[b] + c.x) / ATLAS_TILES, c.y)).r * uBkRange[b];
   d += length(max(abs(lp) - sz * 0.5, 0.0));   // outside the baked box
   return d * uBk[b].z;
 }
@@ -62,12 +74,12 @@ void main() {
   float d = nearest(p, b);
   if (b < 0 || d >= uEdge) { outColor = vec4(0.0); return; }
 
-  vec2 lp = (p - uBk[b].xy) / uBk[b].z;
-  vec3 base = texture(uColor, vec2((float(b) + clamp(lp.x / uBkSize[b].x + 0.5, 0.002, 0.998)) / float(NB),
+  vec2 lp = (p - uBk[b].xy) / uBk[b].z * vec2(uBk[b].w, 1.0);
+  vec3 base = texture(uColor, vec2((uBkTile[b] + clamp(lp.x / uBkSize[b].x + 0.5, 0.002, 0.998)) / ATLAS_TILES,
                                    clamp(lp.y / uBkSize[b].y + 0.5, 0.002, 0.998))).rgb;
 
   vec2 c = clamp(lp / uBkSize[b] + 0.5, uSdfInset, 1.0 - uSdfInset);
-  float shade = texture(uShade, vec2((float(b) + c.x) / float(NB), c.y)).r * 1.5 - 1.0;
+  float shade = texture(uShade, vec2((uBkTile[b] + c.x) / ATLAS_TILES, c.y)).r * 1.5 - 1.0;
   vec3 col = base * (1.0 + ${LIGHT.toFixed(2)} * shade);   // unchanged where the surface faces the viewer
 
   col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, ${VIVID.toFixed(2)});
@@ -109,7 +121,9 @@ function loadImage(url) {
 
 export async function createBlobs(renderer, baseUrl) {
   const meta = await fetch(new URL('blobs.json', baseUrl)).then((r) => r.json());
-  const baked = meta.blobs.slice(0, NB);
+  const baked = meta.blobs.slice(0, ATLAS_TILES);
+  const tileOf = (name) => baked.findIndex((b) => b.name === name);
+  const shapes = [...baked.map((b, tile) => ({ tile, b })), ...FURTHER_DOWN.map((e) => ({ tile: tileOf(e.shape), b: baked[tileOf(e.shape)] }))];
 
   // ---- baked outlines: one atlas, blobs side by side; red + green hold a 12-bit distance ----
   const img = await loadImage(new URL('sdf_atlas.png', baseUrl).href);
@@ -143,12 +157,13 @@ export async function createBlobs(renderer, baseUrl) {
   const uniforms = {
     uView: { value: new THREE.Vector2(1, 1) },
     uEdge,
-    uBk: { value: baked.map(() => new THREE.Vector3()) },
-    uBkRange: { value: baked.map((b) => b.range) },
-    uBkSize: { value: baked.map((b) => new THREE.Vector2(b.w, b.h)) },
+    uBk: { value: shapes.map(() => new THREE.Vector4()) },
+    uBkTile: { value: shapes.map((s) => s.tile) },
+    uBkRange: { value: shapes.map((s) => s.b.range) },
+    uBkSize: { value: shapes.map((s) => new THREE.Vector2(s.b.w, s.b.h)) },
     uSdf: { value: sdfTex },
     uShade: { value: shadeTex },
-    uSdfInset: { value: new THREE.Vector2(0.5 * NB / img.width, 0.5 / img.height) },
+    uSdfInset: { value: new THREE.Vector2(0.5 * ATLAS_TILES / img.width, 0.5 / img.height) },
     uColor: { value: colorTex }
   };
   const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.RawShaderMaterial({
@@ -177,7 +192,10 @@ export async function createBlobs(renderer, baseUrl) {
     const screens = scrollOffset / vh;
     baked.forEach((b, i) => {
       const depth = DEPTH[b.name], h = home[i];
-      uniforms.uBk.value[i].set(h.x, h.y + scrollOffset * depth.rise, scale * (1 + depth.grow * screens));
+      uniforms.uBk.value[i].set(h.x, h.y + scrollOffset * depth.rise, scale * (1 + depth.grow * screens), 1);
+    });
+    FURTHER_DOWN.forEach((e, i) => {
+      uniforms.uBk.value[ATLAS_TILES + i].set(e.x * vw, (scrollOffset - e.at * vh) * e.rise, scale * e.size, e.mirror ? -1 : 1);
     });
   }
 

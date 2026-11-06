@@ -1,16 +1,16 @@
-# Build a three.js typeface JSON subset of Roboto Black Italic with overlapping contours merged.
+# Build a three.js typeface JSON of just the hero's letters, from SF Compact Text Heavy Italic,
+# with overlapping contours merged. Reads a locally installed copy of the font.
 from fontTools.ttLib import TTFont
-from fontTools.varLib import instancer
 from fontTools.pens.recordingPen import RecordingPen
 import numpy as np, cv2, json, sys
+import uharfbuzz as hb
 
-# Roboto-Italic[wdth,wght].ttf from github.com/google/fonts (ofl/roboto)
-SRC = sys.argv[2] if len(sys.argv) > 2 else 'Roboto-Italic[wdth,wght].ttf'
+SRC = sys.argv[2] if len(sys.argv) > 2 else '/Library/Fonts/SF-Compact-Text-HeavyItalic.otf'
 OUT = sys.argv[1]
-TEXT = "BANJI OYEWOLE SOFTWARE CHEF"
+LINES = ("BANJI OYEWOLE", "SOFTWARE CHEF")
+TEXT = " ".join(LINES)
 
-f = TTFont(SRC)
-inst = instancer.instantiateVariableFont(f, {'wght': 900, 'wdth': 100})
+inst = TTFont(SRC)
 gs = inst.getGlyphSet(); cmap = inst.getBestCmap(); upm = inst['head'].unitsPerEm; hmtx = inst['hmtx']
 
 def flatten(rec):
@@ -84,9 +84,21 @@ for ch in sorted(set(TEXT)):
     glyphs[ch] = dict(ha=adv, o=' '.join(o))
     print(ch, len(cs), '->', len(cnts), 'contours,', sum(1 for x in o if x == 'l'), 'pts')
 
+# the font's own spacing for each letter pair in the name, in font units
+hb_font = hb.Font(hb.Face(hb.Blob.from_file_path(SRC)))
+def shaped_width(text, kerning):
+    buf = hb.Buffer(); buf.add_str(text); buf.guess_segment_properties()
+    hb.shape(hb_font, buf, {'kern': kerning})
+    return sum(p.x_advance for p in buf.glyph_positions)
+kern = {}
+for line in LINES:
+    for a, b in zip(line, line[1:]):
+        k = shaped_width(a + b, True) - shaped_width(a + b, False)
+        if k: kern[a + b] = k
+
 hh = inst['hhea']
-data = dict(glyphs=glyphs, familyName='Roboto Black Italic (subset, overlaps removed)',
+data = dict(glyphs=glyphs, kern=kern, familyName='SF Compact Text Heavy Italic (hero letters only)',
             ascender=hh.ascent, descender=hh.descent, underlinePosition=-150, underlineThickness=100,
             boundingBox=dict(xMin=-1500, yMin=-555, xMax=2500, yMax=2163), resolution=upm,
-            original_font_information=dict(license='SIL Open Font License 1.1 (Roboto, Google) - see ROBOTO_OFL.txt'))
+            original_font_information=dict(designer='Apple'))
 json.dump(data, open(OUT, 'w'), separators=(',', ':'))
