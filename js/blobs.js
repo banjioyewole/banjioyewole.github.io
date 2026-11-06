@@ -25,7 +25,7 @@ const FURTHER_DOWN = [
   { shape: 'br', at: 2.5, x: -0.44, size: 1.5, rise: 0.3, mirror: true },
   { shape: 'tr', at: 5.5, x: 0.5, size: 0.8, rise: 0.26, mirror: true },
   { shape: 'tl', at: 7, x: -0.5, size: 0.8, rise: 0.28, mirror: false },
-  { shape: 'extra', atBottom: true, x: 0, size: 0.8, rise: 0.3, mirror: false, inflate: 0.2, turn: 90 }
+  { shape: 'extra', atBottom: true, x: 0.42, size: 0.8, rise: 0.3, mirror: false, inflate: 0.2, turn: 90 }
 ];
 const NB = ORIGINALS + FURTHER_DOWN.length;
 

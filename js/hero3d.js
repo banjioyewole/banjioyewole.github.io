@@ -86,7 +86,7 @@ function createGrain(renderer) {
 
 // How long this device gets to prove it can run the hero. Failing either means the static design.
 const COMPILE_BUDGET_MS = 5000;              // shaders must compile within this
-const STRETCH_DELAY = 0.15, STRETCH_SECONDS = 2.2;   // the name's colours stretching back on arrival
+const STRETCH_START = 0.2, STRETCH_DELAY = 0.15, STRETCH_SECONDS = 2.2;   // the name's colours stretching back on arrival
 const SPEED_CHECK = { settleMs: 500, windowMs: 3000, minFps: 18 };   // measured once live
 
 export async function initHero(canvas, hero, { force = false, signal, onLive, onGiveUp }) {
@@ -291,13 +291,13 @@ export async function initHero(canvas, hero, { force = false, signal, onLive, on
   const clock = new THREE.Clock();
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
-  // On arrival the colours stretch back from the flat letter faces. Perspective squeezes
+  // On arrival the colours stretch back from STRETCH_START of their length. Perspective squeezes
   // the far end of the depth, so this eases the length seen on screen and converts that to a depth.
   function arrival(t) {
     if (reduceMotion) return 1;
     const x = Math.min(1, Math.max(0, (t - STRETCH_DELAY) / STRETCH_SECONDS));
     const full = DEPTH_ART * textK, fullOnScreen = full / (textDist + full);
-    const onScreen = x * x * (3 - 2 * x) * fullOnScreen;   // gentle start and finish
+    const onScreen = (STRETCH_START + (1 - STRETCH_START) * x * x * (3 - 2 * x)) * fullOnScreen;   // gentle start and finish
     // never exactly zero: a flat scale can't be inverted for lighting
     return Math.max(0.002, (onScreen * textDist / (1 - onScreen)) / full);
   }
