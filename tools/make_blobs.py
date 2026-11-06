@@ -52,16 +52,37 @@ def complete_silhouette(mask_full):
     trim = 25
     curve = curve[trim:-trim]
     A, B = curve[-1], curve[0]
-    tA = curve[-1] - curve[-12]; tA /= np.linalg.norm(tA)
-    tB = curve[11] - curve[0]; tB /= np.linalg.norm(tB)
-    L = np.linalg.norm(B - A) * 0.62
-    P0, P1, P2, P3 = A, A + tA * L, B - tB * L, B
+    tA = curve[-1] - curve[-30]; tA /= np.linalg.norm(tA)
+    tB = curve[0] - curve[29]; tB /= np.linalg.norm(tB)     # both point out of the visible curve
+    # carry both edges straight on until they're well past the frame, so the part that closes
+    # the shape stays out of sight, then join them with a curve aimed where the edges would meet
+    gap = np.linalg.norm(B - A)
+    ext = max(250, gap * 0.3)
+    Ae, Be = A + tA * ext, B + tB * ext
+    mid = (Ae + Be) / 2
+    out = mid - curve.mean(0); out /= np.linalg.norm(out)
+    ctrl = mid + out * ext
+    det = tA[0] * tB[1] - tA[1] * tB[0]
+    if abs(det) > 0.05:
+        u = ((Be - Ae)[0] * tB[1] - (Be - Ae)[1] * tB[0]) / det
+        w = ((Be - Ae)[0] * tA[1] - (Be - Ae)[1] * tA[0]) / det
+        if 0 < u < gap * 1.5 and 0 < w < gap * 1.5:
+            ctrl = Ae + tA * u
+    # edges leaving through different sides of the frame: go around the frame corner between them
+    near_x = lambda P: 0 if P[0] < 130 else W0 if P[0] > W0 - 130 else None
+    near_y = lambda P: 0 if P[1] < 130 else H0 if P[1] > H0 - 130 else None
+    cx = near_x(A) if near_x(A) is not None else near_x(B)
+    cy = near_y(A) if near_y(A) is not None else near_y(B)
+    if cx is not None and cy is not None:
+        margin = 200
+        corner = np.array([cx - margin if cx == 0 else cx + margin, cy - margin if cy == 0 else cy + margin], float)
+        ctrl = 2 * corner - mid      # makes the curve pass through this point
     t = np.linspace(0, 1, 200)[:, None]
-    bez = (1 - t) ** 3 * P0 + 3 * (1 - t) ** 2 * t * P1 + 3 * (1 - t) * t ** 2 * P2 + t ** 3 * P3
-    closed = np.vstack([curve, bez[1:-1]])
+    join = (1 - t) ** 2 * Ae + 2 * (1 - t) * t * ctrl + t ** 2 * Be
+    closed = np.vstack([curve, join])
     closed = resample(np.vstack([closed, closed[:1]]), 4.0)[:-1]
     # smooth the joins (circular gaussian on the point list)
-    sig = 6
+    sig = 12
     closed = np.stack([ndimage.gaussian_filter1d(closed[:, i], sig, mode='wrap') for i in range(2)], 1)
     return closed
 
@@ -113,13 +134,16 @@ for idx in order:
     filled = cv2.inpaint(small, (ksmall == 0).astype(np.uint8), 12, cv2.INPAINT_TELEA)
     filled = cv2.GaussianBlur(filled, (0, 0), 3)
     filled = cv2.resize(filled, (bw, bh), interpolation=cv2.INTER_CUBIC)
-    col = np.where(known[..., None] > 0, col, filled)
+    # feather from real to invented colours: the blobs drift, so this join can come into view
+    fade = cv2.erode(known, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61)))
+    fade = cv2.GaussianBlur(fade.astype(np.float32) / 255, (0, 0), 18)[..., None]
+    col = np.round(fade * col + (1 - fade) * filled).astype(np.uint8)
     TS = min(1.0, 1024 / max(bw, bh))
     tex = cv2.resize(cv2.cvtColor(col, cv2.COLOR_BGR2RGB), (int(bw * TS), int(bh * TS)), interpolation=cv2.INTER_AREA)
     Image.fromarray(tex).save(OUT + f'blob_{name}.webp', quality=88, method=6)
 
     # ---- inflate into a volume ----
-    N = 110  # voxels on the long side
+    N = 160  # voxels on the long side
     vs = max(bw, bh) / N  # px per voxel
     gw, gh = int(np.ceil(bw / vs)), int(np.ceil(bh / vs))
     s2 = cv2.resize(sil, (gw, gh), interpolation=cv2.INTER_AREA).astype(float) / 255
@@ -140,9 +164,11 @@ for idx in order:
     from scipy.sparse.linalg import spsolve
     u = np.zeros(inside.shape); u[inside] = spsolve(Am.tocsc(), np.ones(len(yy)))
     half = 1.75 * np.sqrt(np.maximum(u, 0))   # 2.0 = sphere for a disc; slightly flattened
+    half = ndimage.gaussian_filter(half - 2.0 * (~inside), 1.0)   # negative outside: no sheet at z = 0
     zmax = int(np.ceil(half.max())) + 4
     zs = np.arange(-zmax, zmax + 1)
-    vol = (np.abs(zs)[:, None, None] <= half[None, :, :]).astype(np.float32)
+    # soft occupancy rather than on/off voxels, so the surface starts out free of stair-steps
+    vol = np.clip(0.5 + (half[None, :, :] - np.abs(zs)[:, None, None]) / 3.0, 0, 1).astype(np.float32)
     vol = np.pad(vol, 6)
     vol = ndimage.gaussian_filter(vol, 2.6)
     verts, faces, normals, _ = measure.marching_cubes(vol, 0.5, step_size=1)
@@ -166,7 +192,7 @@ for idx in order:
     near = (0.5 - vol) / np.maximum(gm, 1e-3)
     wnear = np.clip(1 - (np.abs(near) - 1.5) / 1.5, 0, 1) * (gm > 0.02)
     sdf_vox = wnear * near + (1 - wnear) * sdf_vox
-    sdf_vox = ndimage.gaussian_filter(sdf_vox, 0.8)
+    sdf_vox = ndimage.gaussian_filter(sdf_vox, 1.2)
     sdf_px = sdf_vox * vs
     nz, ny, nx = vol.shape
     GX, GY, GZ = 96, 96, 80
@@ -174,11 +200,12 @@ for idx in order:
     Zg, Yg, Xg = np.meshgrid(zi, yi, xi, indexing='ij')
     grid = ndimage.map_coordinates(sdf_px, [Zg, Yg, Xg], order=1)
     RANGE = max(bw, bh) * 0.25
-    # sqrt encoding: most of the 8-bit precision sits near the surface (d = 0)
+    # 12-bit linear encoding: red = high byte, green = low bits. Linear matters: the GPU blends
+    # between voxels, and blending a non-linear encoding puts a crease at every voxel boundary.
     g = np.clip(grid / RANGE, -1, 1)
-    q8 = np.clip(np.round((np.sign(g) * np.sqrt(np.abs(g)) * 0.5 + 0.5) * 255), 0, 255).astype(np.uint8)  # (GZ, GY, GX), y down
-    q8 = q8[:, ::-1, :]  # store with y up (row 0 = bottom) to match three.js
-    tiles = np.zeros((10 * GY, 8 * GX), np.uint8)
+    q = np.round((g * 0.5 + 0.5) * 4095).astype(np.uint16)[:, ::-1, :]  # (GZ, GY, GX), row 0 = bottom (three.js y up)
+    q8 = np.stack([q >> 4, (q & 15) << 4, np.zeros_like(q)], -1).astype(np.uint8)
+    tiles = np.zeros((10 * GY, 8 * GX, 3), np.uint8)
     for k in range(GZ):
         r, c = divmod(k, 8)
         tiles[r * GY:(r + 1) * GY, c * GX:(c + 1) * GX] = q8[k]
