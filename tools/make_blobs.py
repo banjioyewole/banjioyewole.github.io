@@ -1,13 +1,11 @@
-# Rebuild the four hero globules as closed, seamless 3D blobs.
+# Rebuild the four hero globules as closed, seamless 2D outlines.
 # 1. segment each blob from the old wallpaper
 # 2. blobs cropped by the wallpaper frame get their silhouette completed with a smooth
 #    tangent-continuous curve (so they're whole blobs, not cut-off slabs)
-# 3. inflate the silhouette into a 3D occupancy volume, blur it, marching-cubes it,
-#    then Taubin-smooth → one watertight surface with no rim seam
+# 3. signed distance to that outline, baked into one atlas for js/lava.js
 # 4. colour texture: cleaned wallpaper colours, extended (inpainted) into the completed parts
 import numpy as np, cv2, json, struct, sys
-from scipy import ndimage, sparse
-from skimage import measure
+from scipy import ndimage
 from PIL import Image
 
 import os
@@ -86,23 +84,10 @@ def complete_silhouette(mask_full):
     closed = np.stack([ndimage.gaussian_filter1d(closed[:, i], sig, mode='wrap') for i in range(2)], 1)
     return closed
 
-def taubin(V, F, iters=12, lam=0.5, mu=-0.53):
-    nV = len(V)
-    i = np.r_[F[:, 0], F[:, 1], F[:, 2], F[:, 1], F[:, 2], F[:, 0]]
-    j = np.r_[F[:, 1], F[:, 2], F[:, 0], F[:, 0], F[:, 1], F[:, 2]]
-    A = sparse.coo_matrix((np.ones(len(i)), (i, j)), shape=(nV, nV)).tocsr()
-    A.data[:] = 1
-    deg = np.asarray(A.sum(1)).ravel(); deg[deg == 0] = 1
-    Dinv = sparse.diags(1 / deg)
-    Wm = Dinv @ A
-    for _ in range(iters):
-        V = V + lam * (Wm @ V - V)
-        V = V + mu * (Wm @ V - V)
-    return V
-
 meta = []
 texs = []
-PADV = 6
+sdf_tiles = []
+TILE = 320   # outline resolution per blob
 for idx in order:
     x, y, w, h, area = st[idx]
     cx, cy = cen[idx]
@@ -142,86 +127,23 @@ for idx in order:
     tex = cv2.resize(cv2.cvtColor(col, cv2.COLOR_BGR2RGB), (int(bw * TS), int(bh * TS)), interpolation=cv2.INTER_AREA)
     Image.fromarray(tex).save(OUT + f'blob_{name}.webp', quality=88, method=6)
 
-    # ---- inflate into a volume ----
-    N = 160  # voxels on the long side
-    vs = max(bw, bh) / N  # px per voxel
-    gw, gh = int(np.ceil(bw / vs)), int(np.ceil(bh / vs))
-    s2 = cv2.resize(sil, (gw, gh), interpolation=cv2.INTER_AREA).astype(float) / 255
-    s2b = (s2 > 0.5).astype(np.uint8)
-    # balloon inflation: solve ∇²u = -1 inside the silhouette (u = 0 outside). sqrt(u) is an
-    # exact hemisphere for a disc and a round tube for a strip — smooth, with no medial ridge.
-    inside = s2b > 0
-    ids = -np.ones(inside.shape, int); ids[inside] = np.arange(inside.sum())
-    yy, xx = np.nonzero(inside)
-    rows = [np.arange(len(yy))]; cols = [np.arange(len(yy))]; vals = [np.full(len(yy), 4.0)]
-    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        ny, nx = yy + dy, xx + dx
-        ok = (ny >= 0) & (ny < gh) & (nx >= 0) & (nx < gw)
-        nb = np.full(len(yy), -1); nb[ok] = ids[ny[ok], nx[ok]]
-        good = nb >= 0
-        rows.append(np.arange(len(yy))[good]); cols.append(nb[good]); vals.append(-np.ones(good.sum()))
-    Am = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(len(yy),) * 2)
-    from scipy.sparse.linalg import spsolve
-    u = np.zeros(inside.shape); u[inside] = spsolve(Am.tocsc(), np.ones(len(yy)))
-    half = 1.75 * np.sqrt(np.maximum(u, 0))   # 2.0 = sphere for a disc; slightly flattened
-    half = ndimage.gaussian_filter(half - 2.0 * (~inside), 1.0)   # negative outside: no sheet at z = 0
-    zmax = int(np.ceil(half.max())) + 4
-    zs = np.arange(-zmax, zmax + 1)
-    # soft occupancy rather than on/off voxels, so the surface starts out free of stair-steps
-    vol = np.clip(0.5 + (half[None, :, :] - np.abs(zs)[:, None, None]) / 3.0, 0, 1).astype(np.float32)
-    vol = np.pad(vol, 6)
-    vol = ndimage.gaussian_filter(vol, 2.6)
-    verts, faces, normals, _ = measure.marching_cubes(vol, 0.5, step_size=1)
-    verts -= 6
-    # vol axes: (z, y, x) → image px, centred on bbox centre; three.js y up
-    Z = (verts[:, 0] - zmax) * vs
-    Y = verts[:, 1] * vs
-    X = verts[:, 2] * vs
-    V = np.stack([X - bw / 2, -(Y - bh / 2), Z], 1)
-    F = faces[:, ::-1].copy()  # winding → outward normals in three.js
-    V = taubin(V, F, iters=40)
-    nv = len(V)
-    print(name, 'verts', nv, 'tris', len(F), 'bbox', bw, bh, 'origin', ox, oy, 'thick', round(2 * half.max() * vs))
-    # ---- signed distance volume (px), resampled to a fixed grid ----
-    inside = vol > 0.5
-    sdf_vox = ndimage.distance_transform_edt(~inside) - ndimage.distance_transform_edt(inside)
-    sdf_vox = sdf_vox - np.sign(sdf_vox) * 0.5        # EDT counts to voxel centres
-    # near the surface use the smooth field: d ≈ (0.5 - vol) / |∇vol| (sub-voxel accurate)
-    gz, gy, gx = np.gradient(vol)
-    gm = np.sqrt(gx * gx + gy * gy + gz * gz)
-    near = (0.5 - vol) / np.maximum(gm, 1e-3)
-    wnear = np.clip(1 - (np.abs(near) - 1.5) / 1.5, 0, 1) * (gm > 0.02)
-    sdf_vox = wnear * near + (1 - wnear) * sdf_vox
-    sdf_vox = ndimage.gaussian_filter(sdf_vox, 1.2)
-    sdf_px = sdf_vox * vs
-    nz, ny, nx = vol.shape
-    GX, GY, GZ = 96, 96, 80
-    zi = np.linspace(0, nz - 1, GZ); yi = np.linspace(0, ny - 1, GY); xi = np.linspace(0, nx - 1, GX)
-    Zg, Yg, Xg = np.meshgrid(zi, yi, xi, indexing='ij')
-    grid = ndimage.map_coordinates(sdf_px, [Zg, Yg, Xg], order=1)
+    # ---- signed distance to the outline (image px), negative inside, resampled to one tile ----
+    inside = sil > 127
+    sd = ndimage.distance_transform_edt(~inside) - ndimage.distance_transform_edt(inside)
+    sd = cv2.GaussianBlur(sd.astype(np.float32), (0, 0), 2.5)
+    tile = cv2.resize(sd, (TILE, TILE), interpolation=cv2.INTER_AREA)[::-1]   # row 0 = bottom (three.js y up)
     RANGE = max(bw, bh) * 0.25
-    # 12-bit linear encoding: red = high byte, green = low bits. Linear matters: the GPU blends
-    # between voxels, and blending a non-linear encoding puts a crease at every voxel boundary.
-    g = np.clip(grid / RANGE, -1, 1)
-    q = np.round((g * 0.5 + 0.5) * 4095).astype(np.uint16)[:, ::-1, :]  # (GZ, GY, GX), row 0 = bottom (three.js y up)
-    q8 = np.stack([q >> 4, (q & 15) << 4, np.zeros_like(q)], -1).astype(np.uint8)
-    tiles = np.zeros((10 * GY, 8 * GX, 3), np.uint8)
-    for k in range(GZ):
-        r, c = divmod(k, 8)
-        tiles[r * GY:(r + 1) * GY, c * GX:(c + 1) * GX] = q8[k]
-    Image.fromarray(tiles).save(OUT + f'sdf_{name}.png', optimize=True)
-    # box of the grid in blob-local px (centred on bbox centre, y up)
-    X0 = -PADV * vs - bw / 2; X1 = X0 + (nx - 1) * vs
-    Ytop = bh / 2 + PADV * vs; Y1 = Ytop - (ny - 1) * vs   # y index 0 is top
-    Z0 = (-PADV - zmax) * vs; Z1 = Z0 + (nz - 1) * vs
-    volume_px3 = inside.sum() * vs ** 3
+    sdf_tiles.append(np.round((np.clip(tile / RANGE, -1, 1) * 0.5 + 0.5) * 4095).astype(np.uint16))
+    print(name, 'bbox', bw, bh, 'origin', ox, oy)
     meta.append(dict(name=name, x=int(ox), y=int(oy), w=int(bw), h=int(bh),
-                     box=[float(X0), float(Y1), float(Z0), float(X1), float(Ytop), float(Z1)],
-                     range=float(RANGE), grid=[GX, GY, GZ],
-                     rEq=float((3 * volume_px3 / (4 * np.pi)) ** (1 / 3))))
+                     range=float(RANGE), rEq=float(np.sqrt(inside.sum() / np.pi))))
     texs.append(Image.open(OUT + f'blob_{name}.webp').convert('RGB').resize((512, 512), Image.LANCZOS))
 
 atlas = Image.new('RGB', (512 * len(texs), 512))
 for i, t in enumerate(texs): atlas.paste(t, (i * 512, 0))
 atlas.save(OUT + 'blob_color_atlas.webp', quality=88, method=6)
+# 12-bit linear distances: red = high byte, green = low bits. Linear matters: the GPU blends
+# between texels, and blending a non-linear encoding would crease the edges at every texel.
+q = np.hstack(sdf_tiles)
+Image.fromarray(np.dstack([q >> 4, (q & 15) << 4, np.zeros_like(q)]).astype(np.uint8)).save(OUT + 'sdf_atlas.png', optimize=True)
 json.dump(dict(imageW=W0, imageH=H0, blobs=meta), open(OUT + 'blobs.json', 'w'), indent=1)
