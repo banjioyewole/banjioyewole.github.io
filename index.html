@@ -29,21 +29,25 @@
       <script src="./js/parallax.js"></script>
 
       <script src="./js/autoScrollTo.js"></script>
-
+      <link rel="stylesheet" href="./css/hero3d.css">
+      <script type="importmap">
+        { "imports": {
+            "three": "./js/vendor/three/three.module.min.js",
+            "three/addons/": "./js/vendor/three/addons/"
+        } }
+      </script>
 
 </head>
 
-<body
-style="background: url(./assets/reigonalpha6.jpg) no-repeat center center fixed; background-color: #000;
--webkit-background-size: cover;
--moz-background-size: cover;
--o-background-size: cover;
-background-size: cover;
-">
+<body class="space">
 
-<div style="height:100%">
-<div w3-include-html="/views/index_thin.html"></div>
-</div>
+<canvas id="starfield" aria-hidden="true"></canvas>
+<canvas id="filmgrain" aria-hidden="true"></canvas>
+
+<section id="hero" class="hero3d">
+  <canvas id="hero3d-canvas" aria-hidden="true"></canvas>
+  <div class="hero3d-ui" w3-include-html="/views/index_thin.html"></div>
+</section>
 
 <div id="cover_letter_thin"></div>
 
@@ -138,6 +142,17 @@ background-size: cover;
 
     <script>
       includeHTML();
+    </script>
+
+    <script src="./js/starfield.js"></script>
+    <script src="./js/filmgrain.js"></script>
+    <script type="module">
+      import { initHero } from './js/hero3d.js';
+      const hero = document.getElementById('hero');
+      initHero(document.getElementById('hero3d-canvas')).catch((err) => {
+        console.warn('3D hero unavailable, using flat artwork', err);
+        hero.classList.add('no-webgl');
+      });
     </script>
 
 </html>
