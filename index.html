@@ -43,7 +43,6 @@
 
 <canvas id="starfield" aria-hidden="true"></canvas>
 <canvas id="hero3d-canvas" aria-hidden="true"></canvas>
-<canvas id="filmgrain" aria-hidden="true"></canvas>
 
 <section id="hero" class="hero3d">
   <div class="hero3d-ui" w3-include-html="/views/index_thin.html"></div>
@@ -145,13 +144,13 @@
     </script>
 
     <script src="./js/starfield.js"></script>
-    <script src="./js/filmgrain.js"></script>
     <script type="module">
       import { initHero } from './js/hero3d.js';
       const hero = document.getElementById('hero');
       initHero(document.getElementById('hero3d-canvas'), hero).catch((err) => {
         console.warn('3D hero unavailable, using flat artwork', err);
         hero.classList.add('no-webgl');
+        window.dispatchEvent(new Event('hero-ready')); // no grain to wait for: let the stars start
       });
     </script>
 

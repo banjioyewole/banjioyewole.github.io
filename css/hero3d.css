@@ -9,18 +9,10 @@ body.space { background: transparent; margin: 0; }
   height: 100vh;
   z-index: -3;
   pointer-events: none;
+  opacity: 0; /* hidden until the hero canvas (which draws the grain) is ready; same fade */
+  transition: opacity 0.9s ease;
 }
-
-/* moving grain sits over the background layers (stars + 3D hero) but under page content */
-#filmgrain {
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: -1;
-  pointer-events: none;
-  opacity: 0.13;
-}
+#starfield.is-ready { opacity: 1; }
 
 .hero3d {
   position: relative;

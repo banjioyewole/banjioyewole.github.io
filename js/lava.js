@@ -4,7 +4,8 @@
 //   • the four original globules (baked SDF volumes extracted from the old wallpaper), and
 //   • spherical/ellipsoidal "wax" globules from the simulation,
 // all joined with a smooth minimum, so nearby globules bridge, merge and neck apart
-// naturally. It renders at reduced resolution into a render target and is upscaled.
+// naturally. It renders at reduced resolution into a render target; colour is upscaled as is,
+// but alpha holds the distance to the silhouette, so edges stay sharp at full resolution.
 //
 // Simulation (JS, screen pixels, y up): globules are heated at the bottom and cool near the
 // top, so they rise, slow, drift and mostly gather/escape at the top. Touching globules pull
@@ -13,9 +14,11 @@
 // starting composition, then are released one by one and relax into the lava.
 import * as THREE from 'three';
 
-const MAXB = 14;                 // simulated wax globules
+const MAXB = 16;                 // simulated wax globules
 const NBAKED = 4;                // original shapes
 const RES_SCALE = 0.5;           // raymarch resolution relative to the canvas
+const SPEED = 0.8;               // how fast the lava lamp runs
+const EDGE_LANE = 0.42;          // globules drift toward this fraction of the width from centre
 
 // site palette (sampled from the original hero / globules), cyclic
 const PALETTE = ['#ffb52a', '#ff9304', '#f15265', '#d535d3', '#b731fa', '#7353ff', '#3d77ff', '#078eff', '#00dcff'];
@@ -36,6 +39,7 @@ out vec4 outColor;
 uniform vec2 uView;            // viewport size in CSS px
 uniform float uTime;
 uniform float uK;              // smooth-union radius (px)
+uniform float uEdge;           // distances to the silhouette are stored within ±uEdge (px)
 uniform float uNoiseAmp;       // surface wobble (px)
 uniform float uZTop;
 uniform int uCount;
@@ -50,6 +54,8 @@ uniform vec2 uBkSize[NB];      // bbox w, h (local px) for colour lookup
 uniform sampler3D uSdf;
 uniform sampler2D uColor;
 uniform vec3 uPal[9];
+
+const float VIVID = 1.2;       // saturation boost on top of the wallpaper's colours
 
 vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
 vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
@@ -97,9 +103,8 @@ float bakedDist(int b, vec3 p, out vec3 lp) {
   vec3 mn = uBkMin[b], mx = uBkMax[b];
   vec3 uvw = (lp - mn) / (mx - mn);
   vec3 c = clamp(uvw, vec3(0.5 / 96.0, 0.5 / 96.0, 0.5 / 80.0), vec3(1.0 - 0.5 / 96.0, 1.0 - 0.5 / 96.0, 1.0 - 0.5 / 80.0));
-  float s = texture(uSdf, vec3((float(b) + c.x) / float(NB), c.y, c.z)).r * 2.0 - 1.0;
-  float range = uBkInfo[b].x;
-  float d = sign(s) * s * s * range;   // stored as sqrt for precision near the surface
+  float s = texture(uSdf, vec3((float(b) + c.x) / float(NB), c.y, c.z)).r;
+  float d = s * uBkInfo[b].x;          // stored as a fraction of the blob's range
   vec3 half_ = (mx - mn) * 0.5;
   vec3 q = abs(lp - (mn + mx) * 0.5) - half_;
   d += length(max(q, 0.0));
@@ -151,14 +156,18 @@ float map(vec3 p) {
   return d + wobble(p);
 }
 
+float gFlat;  // 1 = unlit wallpaper colours (original shapes), 0 = fully lit wax
+
 vec3 mapColor(vec3 p) {
   float d = 1e5, h; vec3 col = vec3(0.0); vec3 lp;
+  gFlat = 0.0;
   for (int b = 0; b < NB; b++) {
     if ((gMask & (1 << (MAXB + b))) == 0) continue;
     float db = bakedDist(b, p, lp);
     vec3 cb = bakedColor(b, lp, p);
     d = smin(db, d, uK, h);
     col = mix(col, cb, h);
+    gFlat = mix(gFlat, 1.0 - smoothstep(0.0, 0.7, uBk[b].w), h);
   }
   for (int i = 0; i < MAXB; i++) {
     if (i >= uCount) break;
@@ -168,6 +177,7 @@ vec3 mapColor(vec3 p) {
     float di = sdEllipsoid(p - B.xyz, r);
     d = smin(di, d, uK, h);
     col = mix(col, ballColor(i, p), h);
+    gFlat = mix(gFlat, 0.0, h);
   }
   return col;
 }
@@ -193,36 +203,54 @@ void main() {
 
   vec3 ro = vec3(px, uZTop);
   vec3 rd = vec3(0.0, 0.0, -1.0);
-  float t = 0.0, minD = 1e5;
+  float t = 0.0, tBest = 0.0, minD = 1e5;
   bool hit = false;
-  float pixel = 1.0 / ${RES_SCALE.toFixed(2)};
   for (int s = 0; s < 72; s++) {
-    vec3 p = ro + rd * t;
-    float d = map(p);
-    minD = min(minD, d);
+    float d = map(ro + rd * t);
+    if (d < minD) { minD = d; tBest = t; }
     if (d < 0.4) { hit = true; break; }
     t += d * 0.85;
     if (t > uZTop * 2.0) break;
   }
-  if (!hit) {
-    // soft silhouette edge from the closest approach
-    float a = 1.0 - smoothstep(0.0, pixel * 1.5, minD);
-    if (a <= 0.0) { outColor = vec4(0.0); return; }
-    t = uZTop; // fall through using the closest region's colour
+  float tSurface = hit ? t : tBest;   // where the colour is read
+
+  // Signed distance to the silhouette (negative inside), stored in alpha so the composite can
+  // draw a sharp edge at full resolution. Inside: carry on through the blob to find how deep
+  // this ray gets; rays well inside stop after a step or two.
+  if (hit) {
+    float stride = uEdge * 0.5;
+    for (int s = 0; s < 6 && minD > -uEdge; s++) {
+      t += stride;
+      float d = map(ro + rd * t);
+      if (d < minD) { minD = d; tBest = t; }
+      stride *= 2.0;
+    }
   }
-  vec3 p = ro + rd * t;
-  const vec2 e = vec2(1.0, -1.0) * 3.5;  // wide normal stencil = smooth shading
+  if (minD >= uEdge) { outColor = vec4(0.0); return; }
+  if (minD > -uEdge) {               // near the edge: pin down the closest approach
+    float w = uEdge * 2.0;
+    for (int s = 0; s < 4; s++) {
+      float dA = map(ro + rd * (tBest - w)), dB = map(ro + rd * (tBest + w));
+      if (dA < minD) { minD = dA; tBest -= w; }
+      if (dB < minD) { minD = dB; tBest += w; }
+      w *= 0.5;
+    }
+  }
+
+  vec3 p = ro + rd * tSurface;
+  const vec2 e = vec2(1.0, -1.0) * 5.0;  // wide normal stencil (about one voxel) = smooth shading
   vec3 n = normalize(e.xyy * map(p + e.xyy) + e.yyx * map(p + e.yyx) + e.yxy * map(p + e.yxy) + e.xxx * map(p + e.xxx));
-  if (!hit) n = vec3(0.0, 0.0, 1.0);
   vec3 base = mapColor(p);
 
   // matte shading, same light as the rest of the hero
   vec3 L = normalize(vec3(-0.6, 0.8, 1.0));
   float diff = max(dot(n, L), 0.0);
   float rim = pow(1.0 - max(n.z, 0.0), 3.0);
-  vec3 col = base * (0.62 + 0.48 * diff) + rim * 0.22 * vec3(1.0, 0.92, 0.7);
-  float alpha = hit ? 1.0 : 1.0 - smoothstep(0.0, pixel * 1.5, minD);
-  outColor = vec4(col, alpha);
+  vec3 col = base * (0.86 + 0.3 * diff) + rim * 0.12 * vec3(1.0, 0.92, 0.7);
+  col = mix(col, base, gFlat);       // the opening shapes start flat, like the wallpaper; light fades in as they melt
+  col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, VIVID);
+  // pixels just outside the blob keep a colour too, so upscaling never fringes toward black
+  outColor = vec4(col, clamp(0.5 - minD / (2.0 * uEdge), 0.0, 1.0));
 }`;
 
 const COMPOSITE_FRAG = /* glsl */`
@@ -230,7 +258,28 @@ precision highp float;
 in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uTex;
-void main() { outColor = texture(uTex, vUv); }`;
+uniform vec2 uTexel;           // size of one render-target pixel, in uv
+uniform float uEdge, uDpr;
+
+// bicubic (B-spline, 4 bilinear taps): smooths the stored distance so the edge has no stair-steps
+float sampleDistance(vec2 uv) {
+  vec2 st = uv / uTexel - 0.5, i = floor(st), f = st - i, f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+  vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w3 = f3 / 6.0;
+  vec2 w2 = 1.0 - w0 - w1 - w3;
+  vec2 g0 = w0 + w1, g1 = w2 + w3;
+  vec2 p0 = (i - 0.5 + w1 / g0) * uTexel;
+  vec2 p1 = (i + 1.5 + w3 / g1) * uTexel;
+  float a = g0.y * (g0.x * texture(uTex, vec2(p0.x, p0.y)).a + g1.x * texture(uTex, vec2(p1.x, p0.y)).a)
+          + g1.y * (g0.x * texture(uTex, vec2(p0.x, p1.y)).a + g1.x * texture(uTex, vec2(p1.x, p1.y)).a);
+  return (0.5 - a) * 2.0 * uEdge;
+}
+
+void main() {
+  float a = clamp(0.5 - sampleDistance(vUv) * uDpr, 0.0, 1.0);   // one device pixel of antialiasing
+  outColor = vec4(texture(uTex, vUv).rgb, a);
+}`;
 
 function loadImage(url) {
   return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
@@ -243,7 +292,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
 
   // ---- baked SDF volumes → one 3D texture (blobs side by side along x) ----
   const imgs = await Promise.all(baked.map((b) => loadImage(new URL(`sdf_${b.name}.png`, baseUrl).href)));
-  const vol = new Uint8Array(GX * NBAKED * GY * GZ);
+  const vol = new Uint16Array(GX * NBAKED * GY * GZ);   // half floats: filterable and most precise near the surface
   const cv = document.createElement('canvas');
   const cx = cv.getContext('2d', { willReadFrequently: true });
   imgs.forEach((img, b) => {
@@ -255,17 +304,18 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
       for (let y = 0; y < GY; y++) {
         for (let x = 0; x < GX; x++) {
           const sx = tc * GX + x, sy = tr * GY + y;
-          vol[(z * GY + y) * GX * NBAKED + b * GX + x] = px[(sy * img.width + sx) * 4];
+          const o = (sy * img.width + sx) * 4;
+          const s = ((px[o] << 4) | (px[o + 1] >> 4)) / 4095 * 2 - 1;
+          vol[(z * GY + y) * GX * NBAKED + b * GX + x] = THREE.DataUtils.toHalfFloat(s);
         }
       }
     }
   });
   const sdfTex = new THREE.Data3DTexture(vol, GX * NBAKED, GY, GZ);
   sdfTex.format = THREE.RedFormat;
-  sdfTex.type = THREE.UnsignedByteType;
+  sdfTex.type = THREE.HalfFloatType;
   sdfTex.minFilter = sdfTex.magFilter = THREE.LinearFilter;
   sdfTex.wrapS = sdfTex.wrapT = sdfTex.wrapR = THREE.ClampToEdgeWrapping;
-  sdfTex.unpackAlignment = 1;
   sdfTex.needsUpdate = true;
 
   const colorTex = await new THREE.TextureLoader().loadAsync(new URL('blob_color_atlas.webp', baseUrl).href);
@@ -278,6 +328,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
     uView: { value: new THREE.Vector2(1, 1) },
     uTime: { value: 0 },
     uK: { value: 60 },
+    uEdge: { value: 4 },
     uNoiseAmp: { value: 0 },
     uZTop: { value: 1000 },
     uCount: { value: 0 },
@@ -301,7 +352,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
   const lavaScene = new THREE.Scene(); lavaScene.add(quad);
   const compMat = new THREE.RawShaderMaterial({
     glslVersion: THREE.GLSL3, vertexShader: 'in vec3 position; in vec2 uv;\n' + VERT, fragmentShader: COMPOSITE_FRAG,
-    uniforms: { uTex: { value: null } }, transparent: true, depthTest: false, depthWrite: false,
+    uniforms: { uTex: { value: null }, uTexel: { value: new THREE.Vector2(1, 1) }, uEdge: uniforms.uEdge, uDpr: { value: 1 } }, transparent: true, depthTest: false, depthWrite: false,
     blending: THREE.CustomBlending, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor
   });
@@ -349,7 +400,7 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
     if (balls.length >= MAXB) return;
     const r = vh * rnd(0.04, 0.085);
     balls.push({
-      x: rnd(-0.42, 0.42) * vw, y: fromBottom ? -vh / 2 - r * 1.4 : rnd(-0.5, 0.5) * vh, z: rnd(-0.1, 0.1) * vh,
+      x: (Math.random() < 0.5 ? -1 : 1) * rnd(0.3, 0.55) * vw, y: fromBottom ? -vh / 2 - r * 1.4 : rnd(-0.5, 0.5) * vh, z: rnd(-0.1, 0.1) * vh,
       r, vx: 0, vy: vh * 0.02, temp: 1, st: 1, seed: (seedCounter = (seedCounter + 0.382) % 1), dirA: rnd(0, 6.283),
       noMergeUntil: 0, absorbInto: null, feed: null, light: Math.random() < 0.4
     });
@@ -452,9 +503,9 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
     // fresh globules from the bottom, once the opening composition has started melting
     const onScreen = balls.filter((b) => Math.abs(b.y) < H * 0.6).length + bk.filter((b) => b.alive && b.released).length;
     if (t > nextSpawn) {
-      if (onScreen < 7) spawn(true);
+      if (onScreen < 10) spawn(true);
       // refill quickly if scrolling has lifted most of the lava away
-      nextSpawn = t + (onScreen < 4 ? rnd(1, 2.5) : rnd(4, 9));
+      nextSpawn = t + (onScreen < 4 ? rnd(1, 2.5) : rnd(3, 6));
     }
   }
 
@@ -467,8 +518,8 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
     // "light" globules stay buoyant and drift off the top; fresh ones replace them from below
     const ay = (a.temp - 0.42 + (a.light ? 0.3 : 0)) * H * 0.045;
     a.vy += ay * dt;
-    a.vx += (Math.sin(a.y * 0.004 + (a.seed ?? a.phase) * 10) * H * 0.004 - (a.x / vw) * H * 0.012) * dt;
-    const halfW = vw / 2 - r * 0.4;
+    a.vx += (Math.sin(a.y * 0.004 + (a.seed ?? a.phase) * 10) * H * 0.004 + ((a.x < 0 ? -EDGE_LANE : EDGE_LANE) - a.x / vw) * H * 0.012) * dt;
+    const halfW = vw / 2;   // a globule may hang half out of frame, like the old wallpaper
     if (a.x > halfW) a.vx -= (a.x - halfW) * 0.6 * dt; else if (a.x < -halfW) a.vx -= (a.x + halfW) * 0.6 * dt;
     const drag = 1 - Math.exp(-dt / 1.6);
     a.vx -= a.vx * drag; a.vy -= a.vy * drag;
@@ -522,13 +573,17 @@ export async function createLava(renderer, baseUrl, { reduceMotion = false } = {
   }
   function resizeRT() {
     const k = RES_SCALE * Math.min(lastDpr, 1.5) * quality;
-    rt.setSize(Math.max(1, Math.round(vw * k)), Math.max(1, Math.round(vh * k)));
+    const rw = Math.max(1, Math.round(vw * k)), rh = Math.max(1, Math.round(vh * k));
+    rt.setSize(rw, rh);
+    compMat.uniforms.uTexel.value.set(1 / rw, 1 / rh);
+    compMat.uniforms.uDpr.value = lastDpr;
+    uniforms.uEdge.value = 3 / k;   // three render-target pixels, enough for the bicubic footprint
   }
 
   return {
     layout(w, h, dpr) { lastDpr = dpr; layout(w, h, dpr); resizeRT(); },
     update(dt, scrollDelta, pointer, frameMs = 16) {
-      if (!reduceMotion) advance(Math.min(dt, 0.25), scrollDelta);
+      if (!reduceMotion) advance(Math.min(dt, 0.25) * SPEED, scrollDelta);
       upload(simT, pointer);
       if (frameMs) adapt(frameMs);
     },
