@@ -47,7 +47,8 @@ in vec4 iShape;            // length, head half-width, tail half-width, speed
 in vec4 iLook;             // alpha, core, halo, warm
 in vec3 iColor;
 uniform vec2 uView;
-uniform float uTime, uLift, uMargin;
+uniform float uTime, uLift, uMargin, uZoom;
+uniform vec2 uCenter;      // what the zoom pushes away from
 uniform vec2 uDir;
 out vec2 vP;               // px from the head: x across, y down the tail
 flat out vec4 vShape;
@@ -61,6 +62,7 @@ void main() {
   vec2 head = mod(travelled + uMargin, span) - uMargin;
   // tail runs down and to the left of the head
   vec2 screen = head + vec2(local.x * -uDir.y - local.y * uDir.x, local.x * uDir.x - local.y * uDir.y);
+  screen = uCenter + (screen - uCenter) * uZoom;
   gl_Position = vec4(screen.x / uView.x * 2.0 - 1.0, 1.0 - screen.y / uView.y * 2.0, 0.0, 1.0);
   vP = local; vShape = iShape; vLook = iLook; vColor = iColor;
 }`;
@@ -114,13 +116,15 @@ void main() {
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = (list) => list[(Math.random() * list.length) | 0];
 
-export function createStars(renderer) {
+export function createStars(renderer, { density }) {
   const uniforms = {
     uView: { value: new THREE.Vector2(1, 1) },
     uTime: { value: 0 },
     uLift: { value: 0 },
     uMargin: { value: MARGIN },
     uPx: { value: 1 },
+    uZoom: { value: 1 },
+    uCenter: { value: new THREE.Vector2() },
     uDir: { value: new THREE.Vector2(Math.sin(TILT), -Math.cos(TILT)) }
   };
   const geometry = new THREE.InstancedBufferGeometry();
@@ -140,7 +144,9 @@ export function createStars(renderer) {
   function seed(w, h) {
     // the photo is drawn "cover", so its streaks scale with the window
     const scale = Math.min(1.6, Math.max(0.75, Math.max(w / 1440, h / 900)));
-    const count = Math.round((w * h) / (310 * scale * scale));
+    const count = Math.round((density * w * h) / (310 * scale * scale));
+    // iOS scales a page with no viewport tag down, so the same CSS px/s would look far slower there
+    const pace = Math.max(1, 1 / (window.visualViewport?.scale || 1));
     const start = new Float32Array(count * 2), shape = new Float32Array(count * 4);
     const look = new Float32Array(count * 4), color = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
@@ -150,7 +156,7 @@ export function createStars(renderer) {
       const len = rand(tier.len[0], tier.len[1]);
       start.set([rand(0, w + 2 * MARGIN), rand(0, h + 2 * MARGIN)], i * 2);
       // px/s; longer streaks move faster
-      shape.set([len * scale, tier.headW * scale, tier.tailW * scale, len * rand(0.9, 1.6) * SPEED], i * 4);
+      shape.set([len * scale, tier.headW * scale, tier.tailW * scale, len * rand(0.9, 1.6) * SPEED * pace], i * 4);
       look.set([rand(tier.alpha[0], tier.alpha[1]), tier.core, tier.halo * scale, warm ? 1 : 0], i * 4);
       color.set(p3(pick(warm ? WARM_COLORS : tier.colors)), i * 3);
     }
@@ -161,18 +167,21 @@ export function createStars(renderer) {
     geometry.instanceCount = count;
   }
 
-  let seededW = 0, seededH = 0;
+  let seededW = 0, seededH = 0, px = 1;
   return {
     compile: () => renderer.compileAsync(scene, cam),
-    layout(w, h, dpr) {
+    layout(w, h, dpr, centerY) {
       uniforms.uView.value.set(w, h);
-      uniforms.uPx.value = 1 / dpr;
+      uniforms.uCenter.value.set(w / 2, centerY);
+      px = 1 / dpr;
       if (w !== seededW || Math.abs(h - seededH) > 160) { // ignore mobile URL-bar jitter
         seededW = w; seededH = h;
         seed(w, h);
       }
     },
-    render(t, scrollOffset) {
+    render(t, scrollOffset, zoom) {
+      uniforms.uZoom.value = zoom;
+      uniforms.uPx.value = px / zoom;   // one device pixel stays one device pixel however far it's zoomed
       uniforms.uTime.value = t;
       uniforms.uLift.value = scrollOffset * PARALLAX;
       renderer.render(scene, cam);

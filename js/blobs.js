@@ -15,6 +15,7 @@ import * as THREE from 'three';
 const ORIGINALS = 4;       // the wallpaper's globules, always first in blobs.json
 const ATLAS_TILES = 5;     // baked shapes: those, plus tools/blob_extra.png
 const RES_SCALE = 0.5;     // shader resolution relative to the layer
+const ARRIVAL_ZOOM = 1.06;  // how far they come forward on arrival, and stay
 const LIGHT = 0.2;         // how strongly the baked shading affects the wallpaper's colours
 const VIVID = 1.2;         // saturation boost on top of the wallpaper's colours
 // how far each blob rises per px scrolled (nearer blobs move faster)
@@ -206,13 +207,23 @@ export async function createBlobs(renderer, baseUrl) {
   const layered = 'ScrollTimeline' in window && matchMedia('(pointer: coarse)').matches;
   const page = document.scrollingElement;   // <body>: this page has no doctype, so it's in quirks mode
   let vw = 1, vh = 1, dpr = 1, home = [], scale = 1, maxScroll = 0, layers = [], timeline = null;
-  let dirty = true, drawnAt = null;
+  let dirty = true, drawnAt = null, drawnArrival = null, centerY = 0;
+  let host = null;
+  if (layered) {
+    host = document.createElement('div');
+    host.className = 'hero3d-globules';
+    host.setAttribute('aria-hidden', 'true');
+    document.body.prepend(host);
+  }
 
   // Where a globule's centre sits with the page scrolled by `offset`: CSS px, origin centre, y up
   function positionAt(index, offset) {
     if (index < ORIGINALS) return { x: home[index].x, y: home[index].y + offset * RISE[shapes[index].b.name] };
     const extra = FURTHER_DOWN[index - ORIGINALS];
     const settlesAt = extra.atBottom ? maxScroll : extra.at * vh, settledY = extra.atBottom ? -vh / 2 : 0;
+    if (extra.atBottom) {   // undo the arrival zoom, so it still ends up where it's meant to
+      return { x: (extra.x * vw) / ARRIVAL_ZOOM, y: (offset - settlesAt) * extra.rise + centerY + (settledY - centerY) / ARRIVAL_ZOOM };
+    }
     return { x: extra.x * vw, y: (offset - settlesAt) * extra.rise + settledY };
   }
 
@@ -256,13 +267,12 @@ export async function createBlobs(renderer, baseUrl) {
 
     const el = document.createElement('canvas');
     el.className = 'hero3d-globule';
-    el.setAttribute('aria-hidden', 'true');
     el.width = renderer.domElement.width;
     el.height = renderer.domElement.height;
     el.getContext('2d', { colorSpace: 'display-p3' }).drawImage(renderer.domElement, 0, 0);
     el.style.width = `${w}px`;
     el.style.height = `${h}px`;
-    document.body.prepend(el);
+    host.append(el);
     return { el, index, w, h, animation: null };
   }
 
@@ -276,7 +286,7 @@ export async function createBlobs(renderer, baseUrl) {
     if (!layered) return;
     removeLayers();
     layers = shapes.map((_, index) => bakeLayer(index));
-    renderer.setSize(vw, vh, false);
+    renderer.setSize(vw, renderer.domElement.clientHeight, false);
     timeline ||= new ScrollTimeline({ source: page, axis: 'block' });
     maxScroll = Math.max(0, page.scrollHeight - page.clientHeight);
     for (const layer of layers) {
@@ -288,8 +298,10 @@ export async function createBlobs(renderer, baseUrl) {
 
   return {
     layered,
-    layout(w, h, ratio) {
+    layout(w, h, ratio, vanishingY) {
       vw = w; vh = h; dpr = ratio;
+      centerY = vh / 2 - vanishingY;
+      if (host) host.style.transformOrigin = `${vw / 2}px ${vanishingY}px`;
       uniforms.uView.value.set(vw, vh);
       // same placement as the old wallpaper, corner-anchored on narrow screens
       const iw = meta.imageW, ih = meta.imageH;
@@ -317,14 +329,21 @@ export async function createBlobs(renderer, baseUrl) {
       return Promise.all([field, renderer.compileAsync(compScene, cam)]);
     },
     bake,
-    render(offset) {
+    // Layers come forward by themselves, on the same timing as `render` gets from the page.
+    arrive({ delay, duration }) {
+      host?.animate([{ transform: 'scale(1)' }, { transform: `scale(${ARRIVAL_ZOOM})` }],
+        { delay, duration, fill: 'both', easing: 'cubic-bezier(0.33, 1, 0.68, 1)' });   // same curve as js/hero3d.js
+    },
+    // arrived: 0 to 1, how far they've come forward
+    render(offset, arrived) {
       if (layered) return;
-      if (dirty || offset !== drawnAt) {   // nothing moves between scrolls
+      if (dirty || offset !== drawnAt || arrived !== drawnArrival) {   // nothing moves between scrolls
+        const zoom = 1 + (ARRIVAL_ZOOM - 1) * arrived;
         shapes.forEach(({ extraSize, mirror }, index) => {
           const { x, y } = positionAt(index, offset);
-          uniforms.uBk.value[index].set(x, y, scale * extraSize, mirror);
+          uniforms.uBk.value[index].set(x * zoom, centerY + (y - centerY) * zoom, scale * extraSize * zoom, mirror);
         });
-        drawnAt = offset; dirty = false;
+        drawnAt = offset; drawnArrival = arrived; dirty = false;
         renderer.setRenderTarget(rt);
         renderer.setClearColor(0x000000, 0);
         renderer.clear();
@@ -336,6 +355,7 @@ export async function createBlobs(renderer, baseUrl) {
     remove() {
       pageObserver.disconnect();
       removeLayers();
+      host?.remove();
     }
   };
 }

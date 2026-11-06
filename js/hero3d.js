@@ -106,13 +106,19 @@ function createGrainLayer() {
   return layer;
 }
 
+// Recent iOS Safari paints the page beyond the viewport too, so on touch screens the sky reaches past
+// its top and bottom edges. Points on screen, far more than those areas need.
+const SKY_OVERHANG = 150;
+
 // How long this device gets to prove it can run the hero. Failing either means the static design.
 const COMPILE_BUDGET_MS = 5000;              // shaders must compile within this
 const STRETCH_START = 0.2, STRETCH_DELAY = 0.15, STRETCH_SECONDS = 2.2;   // the name's colours stretching back on arrival
+const STAR_ZOOM = 1.25;   // the stars push in as the name stretches back, like a dolly zoom, and stay there
 const SPEED_CHECK = { settleMs: 500, windowMs: 3000, minFps: 18 };   // measured once live
 // Touch screens report scroll late and in uneven bursts, so what follows it eases toward each report.
 // A mouse or trackpad's scroll is drawn as it's reported, which keeps it in step with the page.
-const GLIDE_MS = matchMedia('(pointer: coarse)').matches ? 90 : 0;
+const TOUCH = matchMedia('(pointer: coarse)').matches;
+const GLIDE_MS = TOUCH ? 90 : 0;
 
 function createRenderer(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -286,15 +292,18 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
   let textCenterY = 0, textDist = 1, textK = 1;
 
   // ---------- Layout ----------
+  const overhang = blobs.layered ? Math.ceil(SKY_OVERHANG / (window.visualViewport?.scale || 1)) : 0;
+  canvas.style.top = `${-overhang}px`;
+  canvas.style.height = `calc(100vh + ${2 * overhang}px)`;
   let vw = 1, vh = 1, nameDrawnAt = null;
   function layout() {
     // the canvas is fixed to the viewport: globules stay behind the whole site
-    vw = Math.max(1, canvas.clientWidth); vh = Math.max(1, canvas.clientHeight);
-    renderer.setSize(vw, vh, false);
+    vw = Math.max(1, canvas.clientWidth); vh = Math.max(1, canvas.clientHeight - 2 * overhang);
+    renderer.setSize(vw, vh + 2 * overhang, false);
     nameRenderer.setSize(vw, vh, false);
     nameDrawnAt = null;   // resizing wipes the canvas
-    blobs.layout(vw, vh, renderer.getPixelRatio());
-    stars.layout(vw, vh, renderer.getPixelRatio());
+    blobs.layout(vw, vh, renderer.getPixelRatio(), vh * 0.45);   // the name's vanishing point
+    stars.layout(vw, vh + 2 * overhang, renderer.getPixelRatio(), overhang + vh * 0.45);   // the name's vanishing point
 
     // text: same box as the old <img class="hero-transparent">: 80% wide (max 1440px),
     // centred horizontally, vertically centred at 45% of the hero (top: -10%; bottom: 0)
@@ -320,17 +329,22 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
 
   const grain = createGrain(renderer, { sky: true });
   const nameGrain = createGrain(nameRenderer, { sky: false });   // the sky is already behind it
-  const stars = createStars(renderer);
+  // with a mouse or trackpad, enough stars to land on the original density once zoomed
+  const stars = createStars(renderer, { density: TOUCH ? 1 : STAR_ZOOM ** 2 });
   const clock = new THREE.Clock();
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
   // On arrival the colours stretch back from STRETCH_START of their length. Perspective squeezes
   // the far end of the depth, so this eases the length seen on screen and converts that to a depth.
-  function arrival(t) {
+  function arrived(t) {
     if (reduceMotion) return 1;
     const x = Math.min(1, Math.max(0, (t - STRETCH_DELAY) / STRETCH_SECONDS));
+    return 1 - (1 - x) ** 3;   // decelerates: moving at once, settling gently
+  }
+  function arrival(t) {
+    if (reduceMotion) return 1;
     const full = DEPTH_ART * textK, fullOnScreen = full / (textDist + full);
-    const onScreen = (STRETCH_START + (1 - STRETCH_START) * x * x * (3 - 2 * x)) * fullOnScreen;   // gentle start and finish
+    const onScreen = (STRETCH_START + (1 - STRETCH_START) * arrived(t)) * fullOnScreen;
     // never exactly zero: a flat scale can't be inverted for lighting
     return Math.max(0.002, (onScreen * textDist / (1 - onScreen)) / full);
   }
@@ -355,8 +369,8 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
     if (Math.abs(scrollOffset - glide) < 0.25) glide = scrollOffset;
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
-    stars.render(t, glide);
-    blobs.render(glide);
+    stars.render(t, glide, 1 + (STAR_ZOOM - 1) * arrived(t));
+    blobs.render(glide, arrived(t));
     grain.render(now);
 
     // ---- the name: its canvas scrolls with the page, so its scroll is undone inside the canvas.
@@ -414,6 +428,7 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
   console.info(`[backdrop] assets in at ${Math.round(compileStart)}ms, compiled in ${Math.round(performance.now() - compileStart)}ms`);
 
   blobs.bake();
+  blobs.arrive(reduceMotion ? { delay: 0, duration: 0 } : { delay: STRETCH_DELAY * 1000, duration: STRETCH_SECONDS * 1000 });
   const grainLayer = blobs.layered ? document.body.appendChild(createGrainLayer()) : null;
   removeLayers = () => { blobs.remove(); grainLayer?.remove(); };
 
