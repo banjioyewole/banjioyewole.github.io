@@ -176,6 +176,25 @@ for idx in order:
                      range=float(RANGE), rEq=float(np.sqrt(inside.sum() / np.pi))))
     texs.append(Image.open(OUT + f'blob_{name}.webp').convert('RGB').resize((512, 512), Image.LANCZOS))
 
+# ---- one more globule, from its own image rather than the wallpaper ----
+extra = np.asarray(Image.open(os.path.join(ROOT, 'tools/blob_extra.png')).convert('RGBA'))
+PAD_EXTRA = 30
+sil = np.pad(extra[..., 3], PAD_EXTRA)
+rgb = np.pad(extra[..., :3], ((PAD_EXTRA, PAD_EXTRA), (PAD_EXTRA, PAD_EXTRA), (0, 0)))
+# carry the colours out past the soft edge, so the outline never reads colour from empty pixels
+idx = ndimage.distance_transform_edt(sil < 250, return_distances=False, return_indices=True)
+rgb = rgb[idx[0], idx[1]]
+inside = sil > 127
+sd = ndimage.distance_transform_edt(~inside) - ndimage.distance_transform_edt(inside)
+sd = cv2.GaussianBlur(sd.astype(np.float32), (0, 0), 2.5)
+tile = cv2.resize(sd, (TILE, TILE), interpolation=cv2.INTER_AREA)[::-1]
+bh, bw = sil.shape
+RANGE = max(bw, bh) * 0.25
+sdf_tiles.append(np.round((np.clip(tile / RANGE, -1, 1) * 0.5 + 0.5) * 4095).astype(np.uint16))
+shade_tiles.append(np.round((np.clip(balloon_shading(sil), -1, 0.5) + 1) / 1.5 * 255).astype(np.uint8))
+meta.append(dict(name='extra', x=0, y=0, w=int(bw), h=int(bh), range=float(RANGE), rEq=float(np.sqrt(inside.sum() / np.pi))))
+texs.append(Image.fromarray(rgb.astype(np.uint8)).resize((512, 512), Image.LANCZOS))
+
 atlas = Image.new('RGB', (512 * len(texs), 512))
 for i, t in enumerate(texs): atlas.paste(t, (i * 512, 0))
 atlas.save(OUT + 'blob_color_atlas.webp', quality=88, method=6)

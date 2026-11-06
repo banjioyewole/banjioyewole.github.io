@@ -86,9 +86,10 @@ function createGrain(renderer) {
 
 // How long this device gets to prove it can run the hero. Failing either means the static design.
 const COMPILE_BUDGET_MS = 5000;              // shaders must compile within this
+const STRETCH_DELAY = 0.15, STRETCH_SECONDS = 2.2;   // the name's colours stretching back on arrival
 const SPEED_CHECK = { settleMs: 500, windowMs: 3000, minFps: 18 };   // measured once live
 
-export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }) {
+export async function initHero(canvas, hero, { force = false, signal, onLive, onGiveUp }) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -111,6 +112,7 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
     renderer.forceContextLoss();   // releases the GPU memory now, not whenever GC gets to it
     onGiveUp(reason);
   }
+  signal?.addEventListener('abort', () => giveUp('load-timeout'), { once: true });
   renderer.debug.onShaderError = (gl, program, vs, fs) => {
     console.error('Live hero shader failed', gl.getProgramInfoLog(program), gl.getShaderInfoLog(fs));
     giveUp('shader-error');
@@ -137,6 +139,7 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
     createBlobs(renderer, BASE),
     fetch(new URL('sf_compact_hero.json', BASE)).then((r) => r.json())
   ]);
+  if (stopped) return;
 
   // ---------- Name + tagline ----------
   // Same size and placement as the old flat artwork (assets/HERO_SAPPHIRE.png), seen by a
@@ -288,6 +291,17 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
   const clock = new THREE.Clock();
   const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
+  // On arrival the colours stretch back from the flat letter faces. Perspective squeezes
+  // the far end of the depth, so this eases the length seen on screen and converts that to a depth.
+  function arrival(t) {
+    if (reduceMotion) return 1;
+    const x = Math.min(1, Math.max(0, (t - STRETCH_DELAY) / STRETCH_SECONDS));
+    const full = DEPTH_ART * textK, fullOnScreen = full / (textDist + full);
+    const onScreen = x * x * (3 - 2 * x) * fullOnScreen;   // gentle start and finish
+    // never exactly zero: a flat scale can't be inverted for lighting
+    return Math.max(0.002, (onScreen * textDist / (1 - onScreen)) / full);
+  }
+
   function frame() {
     const t = reduceMotion ? 0 : clock.getElapsedTime();
 
@@ -297,7 +311,7 @@ export async function initHero(canvas, hero, { force = false, onLive, onGiveUp }
     // lengths once the letters are far from the vanishing point.
     const sv = scrollOffset / vh;
     text.position.y = textCenterY + scrollOffset;
-    text.scale.z = textK * (1 - 0.88 * smooth(0, 1.1, sv));
+    text.scale.z = textK * (1 - 0.88 * smooth(0, 1.1, sv)) * arrival(t);
     text.visible = sv < 1.6;
 
     renderer.setClearColor(0x000000, 0);
