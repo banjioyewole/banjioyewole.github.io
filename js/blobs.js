@@ -18,12 +18,14 @@ const DEPTH = { tl: { rise: 0.5, grow: 0.1 }, tr: { rise: 0.32, grow: 0.05 }, bl
 // More globules further down the page, reusing those shapes. Each passes through the middle of the
 // screen after scrolling `at` screenfuls: x is a fraction of the width from centre, size is relative
 // to the original shape, and mirror flips it so it doesn't read as a copy. inflate is how round it
-// is as it enters at the bottom of the screen; it reaches full roundness by mid-screen.
+// is as it enters at the bottom of the screen; it reaches full roundness where it settles.
+// atBottom instead of at: it ends up centred on the screen's bottom edge when the page is scrolled
+// all the way down, so half of it shows. turn rotates it anticlockwise, in degrees.
 const FURTHER_DOWN = [
   { shape: 'br', at: 2.5, x: -0.44, size: 1.5, rise: 0.3, mirror: true },
   { shape: 'tr', at: 5.5, x: 0.5, size: 0.8, rise: 0.26, mirror: true },
   { shape: 'tl', at: 7, x: -0.5, size: 0.8, rise: 0.28, mirror: false },
-  { shape: 'extra', at: 8, x: 0.42, size: 0.8, rise: 0.3, mirror: false, inflate: 0.2 }
+  { shape: 'extra', atBottom: true, x: 0, size: 0.8, rise: 0.3, mirror: false, inflate: 0.2, turn: 90 }
 ];
 const NB = ORIGINALS + FURTHER_DOWN.length;
 
@@ -43,6 +45,7 @@ uniform float uEdge;           // distances to the silhouette are stored within 
 uniform vec4 uBk[NB];          // x, y, scale, x mirror (1 or -1)
 uniform float uBkTile[NB];     // which baked shape
 uniform float uBkRound[NB];    // how much of its full roundness it has, 0..1
+uniform vec2 uBkTurn[NB];      // cos, sin of its anticlockwise rotation
 uniform float uBkRange[NB];    // distances are stored as a fraction of this (local px)
 uniform vec2 uBkSize[NB];      // bbox w, h (local px)
 uniform sampler2D uSdf;
@@ -50,8 +53,14 @@ uniform sampler2D uShade;
 uniform vec2 uSdfInset;        // half a texel of one atlas tile, in tile uv
 uniform sampler2D uColor;
 
+vec2 toLocal(int b, vec2 p) {
+  vec2 q = (p - uBk[b].xy) / uBk[b].z;
+  vec2 t = uBkTurn[b];
+  return vec2(q.x * t.x + q.y * t.y, q.y * t.x - q.x * t.y) * vec2(uBk[b].w, 1.0);
+}
+
 float blobDist(int b, vec2 p) {
-  vec2 lp = (p - uBk[b].xy) / uBk[b].z * vec2(uBk[b].w, 1.0);
+  vec2 lp = toLocal(b, p);
   vec2 sz = uBkSize[b];
   vec2 c = clamp(lp / sz + 0.5, uSdfInset, 1.0 - uSdfInset);
   float d = texture(uSdf, vec2((uBkTile[b] + c.x) / ATLAS_TILES, c.y)).r * uBkRange[b];
@@ -77,7 +86,7 @@ void main() {
   float d = nearest(p, b);
   if (b < 0 || d >= uEdge) { outColor = vec4(0.0); return; }
 
-  vec2 lp = (p - uBk[b].xy) / uBk[b].z * vec2(uBk[b].w, 1.0);
+  vec2 lp = toLocal(b, p);
   vec3 base = texture(uColor, vec2((uBkTile[b] + clamp(lp.x / uBkSize[b].x + 0.5, 0.002, 0.998)) / ATLAS_TILES,
                                    clamp(lp.y / uBkSize[b].y + 0.5, 0.002, 0.998))).rgb;
 
@@ -163,6 +172,8 @@ export async function createBlobs(renderer, baseUrl) {
     uBk: { value: shapes.map(() => new THREE.Vector4()) },
     uBkTile: { value: shapes.map((s) => s.tile) },
     uBkRound: { value: shapes.map(() => 1) },
+    uBkTurn: { value: [...originals.map(() => new THREE.Vector2(1, 0)),
+      ...FURTHER_DOWN.map((e) => new THREE.Vector2(Math.cos((e.turn || 0) * Math.PI / 180), Math.sin((e.turn || 0) * Math.PI / 180)))] },
     uBkRange: { value: shapes.map((s) => s.b.range) },
     uBkSize: { value: shapes.map((s) => new THREE.Vector2(s.b.w, s.b.h)) },
     uSdf: { value: sdfTex },
@@ -190,7 +201,13 @@ export async function createBlobs(renderer, baseUrl) {
   rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter;
   compMat.uniforms.uTex.value = rt.texture;
 
-  let vw = 1, vh = 1, home = [], scale = 1, dirty = true;
+  let vw = 1, vh = 1, home = [], scale = 1, dirty = true, maxScroll = 0;
+  // the page's height changes as its sections and images load
+  function measurePage() {
+    maxScroll = Math.max(0, document.documentElement.scrollHeight - vh);
+    dirty = true;
+  }
+  new ResizeObserver(measurePage).observe(document.body);
 
   function place(scrollOffset) {
     const screens = scrollOffset / vh;
@@ -200,11 +217,13 @@ export async function createBlobs(renderer, baseUrl) {
     });
     FURTHER_DOWN.forEach((e, i) => {
       const k = ORIGINALS + i, s = shapes[k];
-      uniforms.uBk.value[k].set(e.x * vw, (scrollOffset - e.at * vh) * e.rise, scale * e.size, e.mirror ? -1 : 1);
+      const settlesAt = e.atBottom ? maxScroll : e.at * vh, settledY = e.atBottom ? -vh / 2 : 0;
+      uniforms.uBk.value[k].set(e.x * vw, (scrollOffset - settlesAt) * e.rise + settledY, scale * e.size, e.mirror ? -1 : 1);
       if (e.inflate !== undefined) {
-        // from where its top edge enters at the bottom of the screen, to mid-screen
-        const midScreen = e.at * vh, enters = midScreen - (vh / 2 + s.b.h * scale * e.size / 2) / e.rise;
-        const x = Math.min(1, Math.max(0, (scrollOffset - enters) / (midScreen - enters)));
+        // from where its top edge enters at the bottom of the screen, to where it settles
+        const halfHeight = (Math.abs(e.turn || 0) % 180 === 90 ? s.b.w : s.b.h) * scale * e.size / 2;
+        const enters = settlesAt - (vh / 2 + halfHeight + settledY) / e.rise;
+        const x = Math.min(1, Math.max(0, (scrollOffset - enters) / (settlesAt - enters)));
         uniforms.uBkRound.value[k] = e.inflate + (1 - e.inflate) * x * x * (3 - 2 * x);
       }
     });
@@ -213,6 +232,7 @@ export async function createBlobs(renderer, baseUrl) {
   return {
     layout(w, h, dpr) {
       vw = w; vh = h;
+      measurePage();
       uniforms.uView.value.set(vw, vh);
       // same placement as the old wallpaper, corner-anchored on narrow screens
       const iw = meta.imageW, ih = meta.imageH;
