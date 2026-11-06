@@ -2,10 +2,12 @@
 # 1. segment each blob from the old wallpaper
 # 2. blobs cropped by the wallpaper frame get their silhouette completed with a smooth
 #    tangent-continuous curve (so they're whole blobs, not cut-off slabs)
-# 3. signed distance to that outline, baked into one atlas for js/lava.js
+# 3. signed distance to that outline, baked into one atlas for js/blobs.js
+# 4. soft shading: the outline inflated like a balloon and lit, baked alongside it
 # 4. colour texture: cleaned wallpaper colours, extended (inpainted) into the completed parts
 import numpy as np, cv2, json, struct, sys
-from scipy import ndimage
+from scipy import ndimage, sparse
+from scipy.sparse.linalg import spsolve
 from PIL import Image
 
 import os
@@ -84,9 +86,43 @@ def complete_silhouette(mask_full):
     closed = np.stack([ndimage.gaussian_filter1d(closed[:, i], sig, mode='wrap') for i in range(2)], 1)
     return closed
 
+def balloon_shading(sil):
+    """Lighting of the outline inflated into a dome, -1..0.5 relative to a surface facing the viewer.
+
+    Taking slopes from the distance to the edge would crease along the middle of long shapes,
+    where the nearest edge flips sides. Solving Poisson's equation (the shape of an inflated
+    membrane) gives a surface with no such ridge.
+    """
+    k = TILE / max(sil.shape)
+    gw, gh = max(2, round(sil.shape[1] * k)), max(2, round(sil.shape[0] * k))
+    inside = cv2.resize(sil, (gw, gh), interpolation=cv2.INTER_AREA) > 127
+    ids = -np.ones(inside.shape, int); ids[inside] = np.arange(inside.sum())
+    yy, xx = np.nonzero(inside)
+    rows, cols = [np.arange(len(yy))], [np.arange(len(yy))]
+    vals = [np.full(len(yy), 4.0)]
+    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        ny, nx = yy + dy, xx + dx
+        ok = (ny >= 0) & (ny < gh) & (nx >= 0) & (nx < gw)
+        nb = np.full(len(yy), -1); nb[ok] = ids[ny[ok], nx[ok]]
+        good = nb >= 0
+        rows.append(np.arange(len(yy))[good]); cols.append(nb[good]); vals.append(-np.ones(good.sum()))
+    A = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(len(yy),) * 2)
+    u = np.zeros(inside.shape); u[inside] = spsolve(A.tocsc(), np.ones(len(yy)))
+    h = ndimage.gaussian_filter(1.75 * np.sqrt(np.maximum(u, 0)), 1.5)   # 2.0 would be a sphere for a disc
+    dh_row, dh_col = np.gradient(h)
+    n = np.dstack([-dh_col, dh_row, np.ones_like(h)])                    # x right, y up, z to the viewer
+    n /= np.linalg.norm(n, axis=2, keepdims=True)
+    L = np.array([-0.6, 0.8, 1.0]); L /= np.linalg.norm(L)
+    shade = n @ L - L[2]
+    # carry the edge's shading outward, so antialiased edge pixels aren't shaded as flat
+    idx = ndimage.distance_transform_edt(~inside, return_distances=False, return_indices=True)
+    shade = ndimage.gaussian_filter(shade[idx[0], idx[1]], 1.0)
+    return cv2.resize(shade.astype(np.float32), (TILE, TILE), interpolation=cv2.INTER_LINEAR)[::-1]   # row 0 = bottom
+
 meta = []
 texs = []
 sdf_tiles = []
+shade_tiles = []
 TILE = 320   # outline resolution per blob
 for idx in order:
     x, y, w, h, area = st[idx]
@@ -134,6 +170,7 @@ for idx in order:
     tile = cv2.resize(sd, (TILE, TILE), interpolation=cv2.INTER_AREA)[::-1]   # row 0 = bottom (three.js y up)
     RANGE = max(bw, bh) * 0.25
     sdf_tiles.append(np.round((np.clip(tile / RANGE, -1, 1) * 0.5 + 0.5) * 4095).astype(np.uint16))
+    shade_tiles.append(np.round((np.clip(balloon_shading(sil), -1, 0.5) + 1) / 1.5 * 255).astype(np.uint8))
     print(name, 'bbox', bw, bh, 'origin', ox, oy)
     meta.append(dict(name=name, x=int(ox), y=int(oy), w=int(bw), h=int(bh),
                      range=float(RANGE), rEq=float(np.sqrt(inside.sum() / np.pi))))
@@ -144,6 +181,7 @@ for i, t in enumerate(texs): atlas.paste(t, (i * 512, 0))
 atlas.save(OUT + 'blob_color_atlas.webp', quality=88, method=6)
 # 12-bit linear distances: red = high byte, green = low bits. Linear matters: the GPU blends
 # between texels, and blending a non-linear encoding would crease the edges at every texel.
+# Blue holds the baked shading.
 q = np.hstack(sdf_tiles)
-Image.fromarray(np.dstack([q >> 4, (q & 15) << 4, np.zeros_like(q)]).astype(np.uint8)).save(OUT + 'sdf_atlas.png', optimize=True)
+Image.fromarray(np.dstack([q >> 4, (q & 15) << 4, np.hstack(shade_tiles)]).astype(np.uint8)).save(OUT + 'sdf_atlas.png', optimize=True)
 json.dump(dict(imageW=W0, imageH=H0, blobs=meta), open(OUT + 'blobs.json', 'w'), indent=1)
