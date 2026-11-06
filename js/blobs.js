@@ -17,15 +17,14 @@ const VIVID = 1.2;         // saturation boost on top of the wallpaper's colours
 const DEPTH = { tl: { rise: 0.5, grow: 0.1 }, tr: { rise: 0.32, grow: 0.05 }, bl: { rise: 0.62, grow: 0.14 }, br: { rise: 0.24, grow: 0.03 } };
 // More globules further down the page, reusing those shapes. Each passes through the middle of the
 // screen after scrolling `at` screenfuls: x is a fraction of the width from centre, size is relative
-// to the original shape, and mirror flips it so it doesn't read as a copy. inflate is how round it
-// is as it enters at the bottom of the screen; it reaches full roundness where it settles.
+// to the original shape, and mirror flips it so it doesn't read as a copy.
 // atBottom instead of at: it ends up centred on the screen's bottom edge when the page is scrolled
 // all the way down, so half of it shows. turn rotates it anticlockwise, in degrees.
 const FURTHER_DOWN = [
   { shape: 'br', at: 2.5, x: -0.44, size: 1.5, rise: 0.3, mirror: true },
   { shape: 'tr', at: 5.5, x: 0.5, size: 0.8, rise: 0.26, mirror: true },
   { shape: 'tl', at: 7, x: -0.5, size: 0.8, rise: 0.28, mirror: false },
-  { shape: 'extra', atBottom: true, x: 0.42, size: 0.8, rise: 0.3, mirror: false, inflate: 0.2, turn: 90 }
+  { shape: 'extra', atBottom: true, x: 0.42, size: 0.8, rise: 0.3, mirror: false, turn: 90 }
 ];
 const NB = ORIGINALS + FURTHER_DOWN.length;
 
@@ -44,7 +43,6 @@ uniform vec2 uView;            // viewport size in CSS px
 uniform float uEdge;           // distances to the silhouette are stored within ±uEdge (px)
 uniform vec4 uBk[NB];          // x, y, scale, x mirror (1 or -1)
 uniform float uBkTile[NB];     // which baked shape
-uniform float uBkRound[NB];    // how much of its full roundness it has, 0..1
 uniform vec2 uBkTurn[NB];      // cos, sin of its anticlockwise rotation
 uniform float uBkRange[NB];    // distances are stored as a fraction of this (local px)
 uniform vec2 uBkSize[NB];      // bbox w, h (local px)
@@ -92,7 +90,7 @@ void main() {
 
   vec2 c = clamp(lp / uBkSize[b] + 0.5, uSdfInset, 1.0 - uSdfInset);
   float shade = texture(uShade, vec2((uBkTile[b] + c.x) / ATLAS_TILES, c.y)).r * 1.5 - 1.0;
-  vec3 col = base * (1.0 + ${LIGHT.toFixed(2)} * uBkRound[b] * shade);   // unchanged where the surface faces the viewer
+  vec3 col = base * (1.0 + ${LIGHT.toFixed(2)} * shade);   // unchanged where the surface faces the viewer
 
   col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, ${VIVID.toFixed(2)});
   // pixels just outside the blob keep a colour too, so upscaling never fringes toward black
@@ -171,7 +169,6 @@ export async function createBlobs(renderer, baseUrl) {
     uEdge,
     uBk: { value: shapes.map(() => new THREE.Vector4()) },
     uBkTile: { value: shapes.map((s) => s.tile) },
-    uBkRound: { value: shapes.map(() => 1) },
     uBkTurn: { value: [...originals.map(() => new THREE.Vector2(1, 0)),
       ...FURTHER_DOWN.map((e) => new THREE.Vector2(Math.cos((e.turn || 0) * Math.PI / 180), Math.sin((e.turn || 0) * Math.PI / 180)))] },
     uBkRange: { value: shapes.map((s) => s.b.range) },
@@ -216,16 +213,8 @@ export async function createBlobs(renderer, baseUrl) {
       uniforms.uBk.value[i].set(h.x, h.y + scrollOffset * depth.rise, scale * (1 + depth.grow * screens), 1);
     });
     FURTHER_DOWN.forEach((e, i) => {
-      const k = ORIGINALS + i, s = shapes[k];
       const settlesAt = e.atBottom ? maxScroll : e.at * vh, settledY = e.atBottom ? -vh / 2 : 0;
-      uniforms.uBk.value[k].set(e.x * vw, (scrollOffset - settlesAt) * e.rise + settledY, scale * e.size, e.mirror ? -1 : 1);
-      if (e.inflate !== undefined) {
-        // from where its top edge enters at the bottom of the screen, to where it settles
-        const halfHeight = (Math.abs(e.turn || 0) % 180 === 90 ? s.b.w : s.b.h) * scale * e.size / 2;
-        const enters = settlesAt - (vh / 2 + halfHeight + settledY) / e.rise;
-        const x = Math.min(1, Math.max(0, (scrollOffset - enters) / (settlesAt - enters)));
-        uniforms.uBkRound.value[k] = e.inflate + (1 - e.inflate) * x * x * (3 - 2 * x);
-      }
+      uniforms.uBk.value[ORIGINALS + i].set(e.x * vw, (scrollOffset - settlesAt) * e.rise + settledY, scale * e.size, e.mirror ? -1 : 1);
     });
   }
 
