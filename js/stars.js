@@ -172,9 +172,9 @@ export function createStars(renderer) {
         seed(w, h);
       }
     },
-    render(t) {
+    render(t, scrollOffset) {
       uniforms.uTime.value = t;
-      uniforms.uLift.value = window.pageYOffset * PARALLAX;
+      uniforms.uLift.value = scrollOffset * PARALLAX;
       renderer.render(scene, cam);
     }
   };

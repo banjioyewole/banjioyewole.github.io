@@ -30,7 +30,7 @@ async function startLive() {
   try {
     const { initHero } = await import('./hero3d.js');
     if (attempt.signal.aborted) return;
-    await initHero(document.getElementById('hero3d-canvas'), document.getElementById('hero'), {
+    await initHero(document.getElementById('hero3d-canvas'), document.getElementById('hero3d-name'), document.getElementById('hero'), {
       force,
       signal: attempt.signal,
       onLive: () => { clearTimeout(limit); setState('live'); },
