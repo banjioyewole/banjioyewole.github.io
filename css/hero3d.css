@@ -1,0 +1,61 @@
+/* Live hero (stars, globules, name), and the static design if it can't run */
+html { background: #000; }
+body.space { background: transparent; margin: 0; }
+
+.hero3d {
+  position: relative;
+  height: 100vh;
+  height: 100svh;
+  min-height: 520px;
+  overflow: hidden;
+}
+
+/* fixed: the globules stay behind the whole site; the name scrolls away inside it */
+#hero3d-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  display: block;
+  z-index: -2;
+  visibility: hidden;   /* until it has drawn its first frame: no fade, it just arrives */
+}
+html[data-backdrop="live"] #hero3d-canvas { visibility: visible; }
+html[data-backdrop="static"] #hero3d-canvas { display: none; }
+
+/* Static design: wallpaper + flat name. The page stays black while the live hero gets its chance;
+   js/backdrop.js shows this only if the hero can't run. Not displayed means not downloaded. */
+#backdrop-static {
+  position: fixed;
+  inset: 0;
+  z-index: -4;
+  pointer-events: none;
+  background: #000 url(../assets/reigonalpha6_2560.jpg) center / cover no-repeat;
+}
+#backdrop-static, .hero3d-fallback { display: none; animation: backdrop-in 0.5s ease; }
+html[data-backdrop="static"] #backdrop-static,
+html[data-backdrop="static"] .hero3d-fallback { display: block; }
+@keyframes backdrop-in { from { opacity: 0; } }
+
+/* resume link + scroll arrow sit on top of the canvas, pinned to the bottom */
+.hero3d-ui {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.hero3d-ui a { pointer-events: auto; }
+
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
