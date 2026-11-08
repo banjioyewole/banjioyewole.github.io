@@ -18,6 +18,7 @@ const RES_SCALE = 0.5;     // shader resolution relative to the layer
 const ARRIVAL_ZOOM = 1.06;  // how far they come forward on arrival, and stay
 const LIGHT = 0.2;         // how strongly the baked shading affects the wallpaper's colours
 const VIVID = 1.2;         // saturation boost on top of the wallpaper's colours
+const NAME_GAP = 0.02;   // least space between the name and a bottom globule, as a share of the height
 // how far each blob rises per px scrolled (nearer blobs move faster)
 const RISE = { tl: 0.5, tr: 0.32, bl: 0.62, br: 0.24 };
 // More globules further down the page, reusing those shapes. Each passes through the middle of the
@@ -154,6 +155,17 @@ export async function createBlobs(renderer, baseUrl) {
     sdf[i] = THREE.DataUtils.toHalfFloat(((px[i * 4] << 4) | (px[i * 4 + 1] >> 4)) / 4095 * 2 - 1);
     shade[i] = px[i * 4 + 2];
   }
+  // each original's outline, row by row: the leftmost and rightmost columns inside it (-1 if none).
+  // Row 0 is the bottom of the shape, as the shader samples it.
+  const tileW = img.width / ATLAS_TILES;
+  const spans = originals.map((_, tile) => Array.from({ length: img.height }, (_, row) => {
+    let lo = -1, hi = -1;
+    for (let col = 0; col < tileW; col++) {
+      const i = (row * img.width + tile * tileW + col) * 4;
+      if (((px[i] << 4) | (px[i + 1] >> 4)) / 4095 * 2 - 1 < 0) { if (lo < 0) lo = col; hi = col; }
+    }
+    return [lo, hi];
+  }));
   const sdfTex = new THREE.DataTexture(sdf, img.width, img.height, THREE.RedFormat, THREE.HalfFloatType);
   sdfTex.minFilter = sdfTex.magFilter = THREE.LinearFilter;
   sdfTex.wrapS = sdfTex.wrapT = THREE.ClampToEdgeWrapping;
@@ -298,7 +310,7 @@ export async function createBlobs(renderer, baseUrl) {
 
   return {
     layered,
-    layout(w, h, ratio, vanishingY) {
+    layout(w, h, ratio, vanishingY, nameBox) {
       vw = w; vh = h; dpr = ratio;
       centerY = vh / 2 - vanishingY;
       if (host) host.style.transformOrigin = `${vw / 2}px ${vanishingY}px`;
@@ -306,10 +318,31 @@ export async function createBlobs(renderer, baseUrl) {
       // same placement as the old wallpaper, corner-anchored on narrow screens
       const iw = meta.imageW, ih = meta.imageH;
       scale = Math.min(Math.max(vw / iw, vh / ih), (vw / iw) * (vw < vh ? 1.3 : 1.7));
-      home = originals.map((m) => {
+      home = originals.map((m, tile) => {
         const left = m.name[1] === 'l', top = m.name[0] === 't';
-        const cxp = left ? (m.x + m.w / 2) * scale : vw - (iw - (m.x + m.w / 2)) * scale;
-        const cyp = top ? (m.y + m.h / 2) * scale : vh - (ih - (m.y + m.h / 2)) * scale;
+        let cxp = left ? (m.x + m.w / 2) * scale : vw - (iw - (m.x + m.w / 2)) * scale;
+        let cyp = top ? (m.y + m.h / 2) * scale : vh - (ih - (m.y + m.h / 2)) * scale;
+        // a bottom globule whose box reaches up beside the name drops until it's clear, with a gap
+        if (!top && nameBox) {
+          const boxLeft = cxp - (m.w / 2) * scale, boxRight = cxp + (m.w / 2) * scale;
+          if (boxRight > nameBox.left && boxLeft < nameBox.right) {
+            cyp += Math.max(0, nameBox.bottom + NAME_GAP * vh - (cyp - (m.h / 2) * scale));
+          }
+        }
+        // a top globule whose outline reaches down beside the name slides out toward its edge until
+        // that part clears the end of the name. Only the rows level with the name count.
+        if (top && nameBox) {
+          let reach = left ? -Infinity : Infinity;
+          spans[tile].forEach(([lo, hi], row) => {
+            if (lo < 0) return;
+            const y = cyp - ((row + 0.5) / img.height - 0.5) * m.h * scale;   // screen y, down
+            if (y < nameBox.top - NAME_GAP * vh || y > nameBox.bottom + NAME_GAP * vh) return;
+            const x = (col) => cxp + ((col + 0.5) / tileW - 0.5) * m.w * scale;
+            reach = left ? Math.max(reach, x(hi)) : Math.min(reach, x(lo));
+          });
+          if (left) cxp -= Math.max(0, reach - (nameBox.left - NAME_GAP * vh));
+          else cxp += Math.max(0, nameBox.right + NAME_GAP * vh - reach);
+        }
         return { x: cxp - vw / 2, y: vh / 2 - cyp };
       });
       const k = RES_SCALE * Math.min(dpr, 1.5);
