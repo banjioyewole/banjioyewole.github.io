@@ -1,6 +1,22 @@
 <html>
 <head>
   <title>Banji Oyewole</title>
+  <!-- Only viewport-fit: no width, so phones still lay the page out 980px wide and scale it down.
+       cover lets the sky reach under the notch in landscape; css/hero3d.css keeps the content clear of it. -->
+  <meta name="viewport" content="viewport-fit=cover">
+  <script>
+    // Which side the Dynamic Island is on in landscape: the top of the phone turned left (90) or right (270).
+    (function () {
+      function island() {
+        var a = screen.orientation ? screen.orientation.angle : window.orientation;
+        a = ((a % 360) + 360) % 360;
+        document.documentElement.dataset.island = a === 90 ? 'left' : a === 270 ? 'right' : 'none';
+      }
+      island();
+      if (screen.orientation) screen.orientation.addEventListener('change', island);
+      else window.addEventListener('orientationchange', island);
+    })();
+  </script>
   <!-- <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.2/jquery.min.js"></script> -->
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:regular,bold,italic,thin,light,bolditalic,black,medium&amp;lang=en">
 

@@ -100,6 +100,24 @@ html[data-backdrop="static"] .hero3d-fallback { display: block; }
 }
 .hero3d-ui a { pointer-events: auto; }
 
+/* Phones in landscape: everything draws edge to edge (viewport-fit=cover in index.html), and only
+   text is kept clear of the Dynamic Island, on whichever side it's on (data-island, set in index.html).
+   iOS reports an inset on both sides, so the other side's is ignored: anything may draw there. */
+:root { --island-left: 0px; --island-right: 0px; }
+html[data-island="left"] { --island-left: env(safe-area-inset-left, 0px); }
+html[data-island="right"] { --island-right: env(safe-area-inset-right, 0px); }
+.hero3d-ui {
+  box-sizing: border-box;
+  padding-left: var(--island-left);
+  padding-right: var(--island-right);
+}
+/* The text column is always the left one. Nudged, not padded: padding narrows the row and wraps the
+   screenshots and videos below the text. Its own 5% margin already covers most of the inset. */
+.container_one {
+  position: relative;
+  left: max(0px, calc(var(--island-left) - 5%));
+}
+
 
 .visually-hidden {
   position: absolute !important;

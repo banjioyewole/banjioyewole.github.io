@@ -302,12 +302,15 @@ export async function initHero(canvas, nameCanvas, hero, { force = false, signal
     renderer.setSize(vw, vh + 2 * overhang, false);
     nameRenderer.setSize(vw, vh, false);
     nameDrawnAt = null;   // resizing wipes the canvas
-    blobs.layout(vw, vh, renderer.getPixelRatio(), vh * 0.45);   // the name's vanishing point
-    stars.layout(vw, vh + 2 * overhang, renderer.getPixelRatio(), overhang + vh * 0.45);   // the name's vanishing point
-
     // text: same box as the old <img class="hero-transparent">: 80% wide (max 1440px),
     // centred horizontally, vertically centred at 45% of the hero (top: -10%; bottom: 0)
     textK = Math.min(vw * 0.8, 1440) / ART_W;
+    // the name's front face on screen, CSS px from the top left, for the globules to keep clear of
+    const nameBox = { left: (vw - ART_W * textK) / 2, right: (vw + ART_W * textK) / 2,
+      top: vh * 0.45 - (ART_H * textK) / 2, bottom: vh * 0.45 + (ART_H * textK) / 2 };
+    blobs.layout(vw, vh, renderer.getPixelRatio(), vh * 0.45, nameBox);   // the name's vanishing point
+    stars.layout(vw, vh + 2 * overhang, renderer.getPixelRatio(), overhang + vh * 0.45);   // the name's vanishing point
+
     text.scale.setScalar(textK);
     // vanishing point = centre of the name + tagline block (fixed on screen)
     textCenterY = vh / 2 - vh * 0.45;
