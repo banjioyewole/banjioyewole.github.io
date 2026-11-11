@@ -17,6 +17,14 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="BANJI OYEWOLE, Software Chef, in gradient lettering on a starfield">
   <meta name="twitter:card" content="summary_large_image">
+  <script>
+    // The page stays black until js/backdrop.js picks a backdrop, then fades in all at once (css/hero3d.css).
+    // Failsafe: if that script never runs, show the page anyway.
+    document.documentElement.classList.add('fade-in');
+    setTimeout(function () {
+      if (!document.documentElement.dataset.backdrop) document.documentElement.classList.remove('fade-in');
+    }, 10000);
+  </script>
   <!-- Only viewport-fit: no width, so phones still lay the page out 980px wide and scale it down.
        cover lets the sky reach under the notch in landscape; css/hero3d.css keeps the content clear of it. -->
   <meta name="viewport" content="viewport-fit=cover">
