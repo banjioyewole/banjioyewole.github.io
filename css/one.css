@@ -323,6 +323,21 @@ filter: progid:DXImageTransform.Microsoft.gradient( startColorstr='#007db9e8', e
   :root{
     --u: 2.375px;
   }
+  /* the stars crowd the text at this size, so they dim over the screen of scrolling into the cover letter.
+     Browsers with scroll timelines draw the globules separately, so this only touches stars.
+     svh, not vh: on a page scaled to fit, Safari stretches 100vh here to about 2.5 screens. */
+  @supports (animation-timeline: scroll()){
+    #hero3d-canvas{
+      animation: dim-stars linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 100svh;
+    }
+  }
+}
+@keyframes dim-stars{
+  to{
+    opacity: 0.6;
+  }
 }
 
 @media (hover: none) and (pointer: coarse) and (max-device-width: 500px) and (orientation: portrait), (max-width: 900px) {
