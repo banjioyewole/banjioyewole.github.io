@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- the hero name's gradient, GRADIENT in js/hero3d.js, its first 5/8 (no cyan), stretched across -->
+  <linearGradient id="g" x1="0" x2="1" y1="0" y2="0">
+    <stop offset="0.0000" stop-color="#ffb52a"/>
+    <stop offset="0.1000" stop-color="#ff9304"/>
+    <stop offset="0.2000" stop-color="#f96c5f"/>
+    <stop offset="0.3000" stop-color="#f15265"/>
+    <stop offset="0.4000" stop-color="#d535d3"/>
+    <stop offset="0.5000" stop-color="#b731fa"/>
+    <stop offset="0.6000" stop-color="#af41e3"/>
+    <stop offset="0.7000" stop-color="#934cf2"/>
+    <stop offset="0.8000" stop-color="#7353ff"/>
+    <stop offset="0.9000" stop-color="#616dff"/>
+    <stop offset="1.0000" stop-color="#4884ff"/>
+  </linearGradient>
+  <rect width="64" height="64" fill="url(#g)"/>
+</svg>
