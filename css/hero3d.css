@@ -2,6 +2,14 @@
 html { background: #000; }
 body.space { background: transparent; margin: 0; }
 
+/* The whole site fades in once the backdrop is ready (data-backdrop, js/backdrop.js), over the start
+   of the arrival dolly, instead of snapping on. No will-change: it would pin a stacking context on body. */
+html.fade-in body { transition: opacity 1.2s cubic-bezier(0.25, 0.1, 0.25, 1); }
+html.fade-in:not([data-backdrop]) body { opacity: 0; transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  html.fade-in body { transition-duration: 0.4s; }
+}
+
 .hero3d {
   position: relative;
   height: 100vh;
