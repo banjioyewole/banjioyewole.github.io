@@ -64,3 +64,8 @@
 }
 .redaction_stage[data-fallback] .redaction_fallback { display: block; }
 .redaction_stage[data-fallback] .redaction_canvas { display: none; }
+
+/* Lite (js/redaction-project-globe.js): the line in plain white, one layer, no blending. */
+.redaction_stage[data-lite] .redaction_caption_r,
+.redaction_stage[data-lite] .redaction_caption_b { display: none; }
+.redaction_stage[data-lite] .redaction_caption_g { color: #fff; mix-blend-mode: normal; }
