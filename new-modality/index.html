@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>new-modality</title>
+  <meta name="description" content="The mouse and keyboard are dead. Long live new-modality.">
+  <meta name="theme-color" content="#000000">
+  <link rel="icon" href="/images/favicon/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/redaction-project-globe.css">
+  <style>
+    /* The redaction project globe on its own, full screen: the same window as on the home page,
+       with nothing around it. It is also what the MDR kiosk iMac shows when switched to it. */
+    html, body { margin: 0; background: #000; overflow: hidden; cursor: none; }
+    .visually-hidden {
+      position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+    }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "/js/vendor/three/three.module.min.js" } }
+  </script>
+</head>
+<body>
+  <!-- data-replay: on its own page the line is said again this many seconds after the last time -->
+  <section id="new_modality" class="redaction_window" aria-label="new-modality" data-replay="40">
+    <div class="redaction_stage">
+      <canvas class="redaction_canvas" aria-hidden="true"></canvas>
+      <img class="redaction_fallback" src="/assets/new_modality/redaction-project-globe.png" alt="" loading="lazy">
+      <p class="redaction_caption" aria-hidden="true">
+        <span class="redaction_caption_layer redaction_caption_r"></span>
+        <span class="redaction_caption_layer redaction_caption_g"></span>
+        <span class="redaction_caption_layer redaction_caption_b"></span>
+      </p>
+      <h1 class="visually-hidden">new-modality</h1>
+      <p class="visually-hidden">The mouse and keyboard are dead. Long live new-modality.</p>
+    </div>
+  </section>
+  <script type="module" src="/js/redaction-project-globe.js"></script>
+</body>
+</html>
