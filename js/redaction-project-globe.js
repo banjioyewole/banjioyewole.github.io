@@ -41,7 +41,7 @@ const LAMP_DIP = 2.5;
 const TRACE = { duration: 1.4, blank: 0.08, follower: 0.04, between: 0.05, bright: 0.5 };
 const DOTS = { count: 24000, radius: 40, color: 0x636366, spacing: 0.11, size: 0.013 };
 const RING = { run: 0.75, tail: 0.4, edge: 0.04, swellRise: 0.25, swellFall: 0.9 };
-const BLUR = { above: (0.7 - 0.125) / 0.75, below: 0.125 / 0.75, globe: 3, dots: 3, dotsGain: 3 };
+const BLUR = { above: (0.7 - 0.125) / 0.75, below: 0.125 / 0.75, globe: 1.5, dots: 1.5, dotsGain: 2 };
 
 const STRUT_RADIUS = END_THICKNESS * STROKE / 2;
 const ARROW_STANDOFF = STRUT_RADIUS + 0.005;
