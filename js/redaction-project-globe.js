@@ -15,6 +15,23 @@ import * as THREE from 'three';
 const TAU = Math.PI * 2;
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// Lite: for the MDR kiosk iMac (a Raspberry Pi 5 driving a 1024×768 CRT), and anything else that
+// can't hold a steady frame rate with the full look. Drawn straight to the screen: no blur, no
+// lens fringes, no grain, the cut from one sample a pixel, and the globe 30% larger, since the
+// tube is small and seen from across the room. On for Firefox on ARM Linux (the kiosk), or with
+// ?lite; ?lite=0 turns it off.
+//   ?fpslog   reports the frame rate to the server every 5s (GET /fps-log?...), to tune it by
+const params = new URLSearchParams(location.search);
+const LITE = params.has('lite')
+  ? params.get('lite') !== '0'
+  : /Firefox\//.test(navigator.userAgent) && /Linux (aarch64|arm)/.test(navigator.userAgent);
+const LITE_SCALE = 1.3;
+// Knobs for tuning lite, measured on the kiosk with ?fpslog (2026-11-14, a 75Hz CRT): as built it
+// held 75fps with every frame 14ms. Antialiasing took it to 60-70 and uneven, so lite goes without;
+// ?aa=1 brings it back. ?dots=0 drops the dot wall and ?cut=0 the arrow's cut, which cost little
+// and nothing respectively once the cut's shader was unrolled.
+const KNOB = (name, lite = true) => (params.has(name) ? params.get(name) !== '0' : lite);
+
 // ---------- From GlobeScene.swift (numbers read out of assets/redaction-project.blend) ----------
 const SEGMENTS = 18, RINGS = 13, FIRST_MERIDIAN = 70 * Math.PI / 180;
 const END_THICKNESS = 0.038;
@@ -335,27 +352,42 @@ const inkVertex = /* glsl */`
 const gapChunk = /* glsl */`
   uniform mat4 overlayFromWorld;
   uniform vec3 eyeO;
-  uniform vec2 gapPts[6];
+  uniform vec4 gapSeg[5];      // each segment's start, and its direction
+  uniform float gapLen[5];     // its length; 0 for none
+  uniform vec4 gapCorner[4];   // each corner's incoming and outgoing directions
+  uniform vec3 gapCornerAt[4]; // the corner, and 1 if there is one
   uniform int gapCount;
   uniform float gapRadius, gapCurve, gapScale, gapBend, gapHalf;
   varying vec3 vWorld;
   float crossz(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+  // Unrolled, with every index fixed and the segments' directions and lengths worked out once a
+  // frame in JS: looping over a uniform array by a changing index cost the kiosk Pi's GPU half its
+  // frame rate. A segment of length 0, or a corner whose flag is 0, is switched off.
   bool inBand(vec2 p) {
-    for (int i = 0; i < 5; i++) {
-      if (i + 1 >= gapCount) break;
-      vec2 a = gapPts[i], ab = gapPts[i + 1] - a;
-      float L = length(ab);
-      if (L < 1e-6) continue;
-      vec2 u = ab / L, w = p - a;
-      float t = dot(w, u);
-      if (t >= 0.0 && t <= L && abs(crossz(u, w)) <= gapHalf) return true;
-    }
-    for (int i = 1; i < 5; i++) {
-      if (i + 1 >= gapCount) break;
-      vec2 b = gapPts[i];
-      vec2 u1 = normalize(b - gapPts[i - 1]), u2 = normalize(gapPts[i + 1] - b), w = p - b;
-      if (dot(w, u1) > 0.0 && dot(w, u2) < 0.0 && abs(crossz(u1, w)) <= gapHalf && abs(crossz(u2, w)) <= gapHalf) return true;
-    }
+    vec2 w;
+    float t;
+    w = p - gapSeg[0].xy; t = dot(w, gapSeg[0].zw);
+    if (gapLen[0] > 0.0 && t >= 0.0 && t <= gapLen[0] && abs(crossz(gapSeg[0].zw, w)) <= gapHalf) return true;
+    w = p - gapSeg[1].xy; t = dot(w, gapSeg[1].zw);
+    if (gapLen[1] > 0.0 && t >= 0.0 && t <= gapLen[1] && abs(crossz(gapSeg[1].zw, w)) <= gapHalf) return true;
+    w = p - gapSeg[2].xy; t = dot(w, gapSeg[2].zw);
+    if (gapLen[2] > 0.0 && t >= 0.0 && t <= gapLen[2] && abs(crossz(gapSeg[2].zw, w)) <= gapHalf) return true;
+    w = p - gapSeg[3].xy; t = dot(w, gapSeg[3].zw);
+    if (gapLen[3] > 0.0 && t >= 0.0 && t <= gapLen[3] && abs(crossz(gapSeg[3].zw, w)) <= gapHalf) return true;
+    w = p - gapSeg[4].xy; t = dot(w, gapSeg[4].zw);
+    if (gapLen[4] > 0.0 && t >= 0.0 && t <= gapLen[4] && abs(crossz(gapSeg[4].zw, w)) <= gapHalf) return true;
+    w = p - gapCornerAt[0].xy;
+    if (gapCornerAt[0].z > 0.0 && dot(w, gapCorner[0].xy) > 0.0 && dot(w, gapCorner[0].zw) < 0.0
+        && abs(crossz(gapCorner[0].xy, w)) <= gapHalf && abs(crossz(gapCorner[0].zw, w)) <= gapHalf) return true;
+    w = p - gapCornerAt[1].xy;
+    if (gapCornerAt[1].z > 0.0 && dot(w, gapCorner[1].xy) > 0.0 && dot(w, gapCorner[1].zw) < 0.0
+        && abs(crossz(gapCorner[1].xy, w)) <= gapHalf && abs(crossz(gapCorner[1].zw, w)) <= gapHalf) return true;
+    w = p - gapCornerAt[2].xy;
+    if (gapCornerAt[2].z > 0.0 && dot(w, gapCorner[2].xy) > 0.0 && dot(w, gapCorner[2].zw) < 0.0
+        && abs(crossz(gapCorner[2].xy, w)) <= gapHalf && abs(crossz(gapCorner[2].zw, w)) <= gapHalf) return true;
+    w = p - gapCornerAt[3].xy;
+    if (gapCornerAt[3].z > 0.0 && dot(w, gapCorner[3].xy) > 0.0 && dot(w, gapCorner[3].zw) < 0.0
+        && abs(crossz(gapCorner[3].xy, w)) <= gapHalf && abs(crossz(gapCorner[3].zw, w)) <= gapHalf) return true;
     return false;
   }
   // Where the line of sight to world point F crosses the cut's shell, as flat art; false if it
@@ -386,14 +418,18 @@ const gapChunk = /* glsl */`
   // How much of this pixel the cut leaves, from four points across it.
   float gapCoverage() {
     if (gapCount < 2) return 1.0;
+    #if GAP_SAMPLES == 1
+      vec2 one;
+      return toArt(vWorld, one) && inBand(one) ? 0.0 : 1.0;
+    #endif
     vec3 dx = dFdx(vWorld) * 0.25, dy = dFdy(vWorld) * 0.25;
     float kept = 0.0;
     vec2 art;
-    for (int i = 0; i < 4; i++) {
-      vec3 o = (i == 0 ? -dx - dy : i == 1 ? dx - dy : i == 2 ? -dx + dy : dx + dy);
+    for (int i = 0; i < GAP_SAMPLES; i++) {
+      vec3 o = GAP_SAMPLES == 1 ? vec3(0.0) : (i == 0 ? -dx - dy : i == 1 ? dx - dy : i == 2 ? -dx + dy : dx + dy);
       kept += toArt(vWorld + o, art) && inBand(art) ? 0.0 : 1.0;
     }
-    return kept * 0.25;
+    return kept / float(GAP_SAMPLES);
   }`;
 
 const inkFragment = /* glsl */`
@@ -431,7 +467,9 @@ const inkFragment = /* glsl */`
     float fall = 1.0 / (1.0 + 1.5 * reach * reach);
     float diffuse = max((dot(n, L) + 0.7) / 1.7, 0.0) * fall * 1.7;
     float glint = pow(max(dot(n, normalize(L + V)), 0.0), 10.0) * fall * 0.6;
-    gl_FragColor = vec4(c * (0.5 * min(inkGain, 1.0) + 0.5 * (diffuse + glint) * inkGain), 1.0) * kept;
+    gl_FragColor = vec4(c * (0.5 * min(inkGain, 1.0) + 0.5 * (diffuse + glint) * inkGain), 1.0);
+    #include <colorspace_fragment>
+    gl_FragColor *= kept;
   }`;
 
 const dotsVertex = /* glsl */`
@@ -460,7 +498,9 @@ const dotsFragment = /* glsl */`
       float k = behind >= 0.0 ? exp(-behind / ring.y) : 1.0 - smoothstep(0.0, ring.z, -behind);
       col = mix(col, vec3(ring.w), clamp(k, 0.0, 1.0));
     }
-    gl_FragColor = vec4(col * a, a);
+    gl_FragColor = vec4(col, 1.0);
+    #include <colorspace_fragment>
+    gl_FragColor = vec4(gl_FragColor.rgb * a, a);
   }`;
 
 const quadVertex = /* glsl */`
@@ -523,7 +563,8 @@ function startGlobe(stage) {
   const caption = stage.querySelector('.redaction_caption');
   const section = stage.closest('.redaction_window');
 
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+  if (LITE) stage.dataset.lite = '';
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: KNOB('aa', false), alpha: false, powerPreference: 'high-performance' });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.setClearColor(0x000000, 0);
   renderer.autoClear = false;
@@ -546,14 +587,16 @@ function startGlobe(stage) {
     eyeG: { value: new THREE.Vector3() }, lampG: { value: new THREE.Vector3() },
     // the cut (gapChunk)
     overlayFromWorld: { value: new THREE.Matrix4() }, eyeO: { value: new THREE.Vector3() },
-    gapPts: { value: Array.from({ length: 6 }, () => new THREE.Vector2()) }, gapCount: { value: 0 },
+    gapSeg: { value: Array.from({ length: 5 }, () => new THREE.Vector4()) }, gapLen: { value: new Array(5).fill(0) },
+    gapCorner: { value: Array.from({ length: 4 }, () => new THREE.Vector4()) },
+    gapCornerAt: { value: Array.from({ length: 4 }, () => new THREE.Vector3()) }, gapCount: { value: 0 },
     gapRadius: { value: WRAP_RADIUS }, gapCurve: { value: 0 }, gapScale: { value: 1 }, gapBend: { value: WRAP_BEND }, gapHalf: { value: GAP_HALF },
   };
   const inkMaterial = new THREE.ShaderMaterial({ uniforms, vertexShader: inkVertex, fragmentShader: inkFragment, side: THREE.DoubleSide });
   // The struts and joints, cut by the arrow: premultiplied, so a pixel the cut's edge crosses keeps
   // only its share of the ink.
   const strutMaterial = new THREE.ShaderMaterial({
-    uniforms, vertexShader: inkVertex, fragmentShader: inkFragment, side: THREE.DoubleSide, defines: { CUT: '' },
+    uniforms, vertexShader: inkVertex, fragmentShader: inkFragment, side: THREE.DoubleSide, defines: KNOB('cut') ? { CUT: '', GAP_SAMPLES: LITE ? 1 : 4 } : {},
     blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
   });
   const depthOnly = () => new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide });
@@ -619,7 +662,20 @@ function startGlobe(stage) {
     }
     // the cut: the drawn shaft, on its shell, at this much bend
     uniforms.gapCount.value = drawn.length;
-    drawn.forEach((p, i) => uniforms.gapPts.value[i].set(p[0], p[1]));
+    const dirs = [];
+    for (let i = 0; i < 5; i++) {
+      const a = drawn[i], b = drawn[i + 1], L = a && b ? len(sub(b, a)) : 0;
+      const u = L > 1e-6 ? mul(sub(b, a), 1 / L) : [1, 0];
+      dirs.push(L > 1e-6 ? u : null);
+      uniforms.gapSeg.value[i].set(a ? a[0] : 0, a ? a[1] : 0, u[0], u[1]);
+      uniforms.gapLen.value[i] = L > 1e-6 ? L : 0;
+    }
+    for (let i = 0; i < 4; i++) {
+      const u1 = dirs[i], u2 = dirs[i + 1], at = drawn[i + 1];
+      const on = u1 && u2 && at;
+      uniforms.gapCorner.value[i].set(on ? u1[0] : 1, on ? u1[1] : 0, on ? u2[0] : 1, on ? u2[1] : 0);
+      uniforms.gapCornerAt.value[i].set(on ? at[0] : 0, on ? at[1] : 0, on ? 1 : 0);
+    }
     const flatScale = screenRadius(DISTANCE - WRAP_RADIUS) * WRAP_BEND / WRAP_RADIUS;
     uniforms.gapCurve.value = wrapAmount;
     uniforms.gapScale.value = flatScale + (1 - flatScale) * wrapAmount;
@@ -658,7 +714,7 @@ function startGlobe(stage) {
 
   // Post: dots and scene drawn apart, each blurred toward the foot, then the lens over both.
   const rt = (samples = 0) => new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples });
-  const targets = { dots: rt(), scene: rt(4), tmp: rt(), dotsBlur: rt(), sceneBlur: rt() };
+  const targets = LITE ? {} : { dots: rt(), scene: rt(4), tmp: rt(), dotsBlur: rt(), sceneBlur: rt() };
   const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
   const quadScene = new THREE.Scene();
@@ -690,11 +746,11 @@ function startGlobe(stage) {
   let W = 1, H = 1, pr = 1, D = 1, vfov = 20, centreY = 0.44;
   function layout() {
     W = Math.max(1, stage.clientWidth); H = Math.max(1, stage.clientHeight);
-    pr = Math.min(window.devicePixelRatio || 1, 1.75);
+    pr = Math.min(window.devicePixelRatio || 1, LITE ? 1 : 1.75);
     renderer.setPixelRatio(pr);
     renderer.setSize(W, H, false);
     for (const t of Object.values(targets)) t.setSize(Math.round(W * pr), Math.round(H * pr));
-    D = Math.min(W * 0.5, H * 0.34);
+    D = Math.min(W * 0.5, H * 0.34) * (LITE ? LITE_SCALE : 1);
     vfov = 2 * Math.atan(H * TAN_R / D) * 180 / Math.PI;
     camera.fov = vfov;
     camera.aspect = W / H;
@@ -879,6 +935,14 @@ function startGlobe(stage) {
     uniforms.eyeO.value.copy(camera.position).applyMatrix4(uniforms.overlayFromWorld.value);
 
     // ----- draw -----
+    if (LITE) {
+      renderer.setRenderTarget(null);
+      renderer.clear();
+      if (KNOB('dots')) renderer.render(dotsScene, camera);
+      renderer.clearDepth();
+      renderer.render(scene, camera);
+      return endFrame(now);
+    }
     renderer.setRenderTarget(targets.dots);
     renderer.clear();
     renderer.render(dotsScene, camera);
@@ -896,8 +960,24 @@ function startGlobe(stage) {
     finalMaterial.uniforms.dotsTex.value = targets.dotsBlur.texture;
     finalMaterial.uniforms.seed.value = Math.floor(clock * 24) % 1000;
     pass(finalMaterial, null);
+    endFrame(now);
+  }
+  // ?fpslog: frames drawn per second, posted to the server's log every 5s.
+  const fpsLog = params.has('fpslog');
+  let fpsFrames = 0, fpsSince = 0, worst = 0, lastAt = 0;
+  function endFrame(now) {
     dirty = false;
-
+    if (fpsLog) {
+      fpsFrames++;
+      if (lastAt) worst = Math.max(worst, now - lastAt);
+      lastAt = now;
+      if (!fpsSince) fpsSince = now;
+      if (now - fpsSince >= 5000) {
+        const fps = (fpsFrames * 1000 / (now - fpsSince)).toFixed(1);
+        fetch(`/fps-log?fps=${fps}&worst=${worst.toFixed(0)}ms&lite=${LITE ? 1 : 0}&size=${W}x${H}&pr=${pr}`).catch(() => {});
+        fpsFrames = 0; fpsSince = now; worst = 0;
+      }
+    }
     if (failed) return fallBack();
     if (visible && !reduceMotion) raf = requestAnimationFrame(frame);
     else last = null;
