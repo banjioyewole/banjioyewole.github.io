@@ -1113,14 +1113,28 @@ function whenStageArrives(section, then) {
   watch.observe(section, { childList: true, subtree: true });
 }
 
+// Nothing is built until the section is within a screen of being scrolled to: not the WebGL
+// context, the dots, the render targets (tens of MB of a phone's GPU memory) or the text's
+// pictures, so a visit that never gets that far down the page pays nothing for it, and the hero
+// has the page to itself as it loads. On /new-modality/ the section is the screen, so it starts at once.
+function whenNear(section, then) {
+  if (!('IntersectionObserver' in window)) return then();
+  const near = new IntersectionObserver(([entry]) => {
+    if (!entry.isIntersecting) return;
+    near.disconnect();
+    then();
+  }, { rootMargin: '100% 0px' });
+  near.observe(section);
+}
+
 const section = document.getElementById('new_modality');
 if (section) {
-  whenStageArrives(section, (stage) => {
+  whenStageArrives(section, (stage) => whenNear(section, () => {
     const fallBack = () => {
       stage.dataset.fallback = '';
       buildCaption(stage.querySelector('.redaction_caption'))(SPEECH.text.map((l) => l.length));
     };
     if (!hasWebGL2()) return fallBack();
     try { startGlobe(stage); } catch (err) { console.warn('Redaction project globe unavailable', err); fallBack(); }
-  });
+  }));
 }
