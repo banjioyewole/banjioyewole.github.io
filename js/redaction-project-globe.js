@@ -50,6 +50,7 @@ const WAVE = { sweep: 1.1, rest: 0.25, lead: 0.22, tail: 0.9, depth: 0.95 };
 // ---------- From the phone's Vision look ----------
 const STROKE = 1.25;                  // the struts' weight at this size
 const SPIN_PERIOD = 60;               // a turn a minute
+const SPEECH_TEMPO = 1.4;             // the line said this much quicker than it was timed; the globe at its own pace
 const ENTRANCE_PACE = 20;             // the entrance's turn, averaged
 const LOUDNESS_GAIN = 0.15;           // how much bigger the loudest speech makes it
 const WRAP_RADIUS = 1.3, WRAP_RATE = 10, WRAP_STEP = 0.02, WRAP_LIFT = 0.03;
@@ -58,6 +59,7 @@ const LAMP_DIP = 2.5;
 const TRACE = { duration: 1.4, blank: 0.08, follower: 0.04, between: 0.05, bright: 0.5 };
 const DOTS = { count: 24000, radius: 40, color: 0x636366, spacing: 0.11, size: 0.013 };
 const RING = { run: 0.75, tail: 0.4, edge: 0.04, swellRise: 0.25, swellFall: 0.9 };
+const TOUCH = { push: -1.3, stiffness: 180, damping: 10, ring: 0.45, swell: 0.6 };   // a tap on the globe
 const BLUR = { above: (0.7 - 0.125) / 0.75, below: 0.125 / 0.75, globe: 1.5, dots: 1.5, dotsGain: 2 };
 
 const STRUT_RADIUS = END_THICKNESS * STROKE / 2;
@@ -74,6 +76,35 @@ const LINES = [
 const STRESSED = new Set(['mouse', 'key', 'dead.', 'Long', 'live', 'mo']);
 const SPEECH_LEAD = 0.45;             // from the microphone opening to the first word
 
+// The app's text is shown as pictures of it, rendered in its own faces by
+// tools/render_new_modality_text.swift: the public site can't serve Apple's SF font files.
+const TEXT = (name) => new URL(`../assets/new_modality/text/${name}.png`, import.meta.url).href;
+
+// The labels over the globe, as the app's HUD sets them (new-modality: RecordingHUD.swift): its
+// globe is 330pt across, the labels 26pt above it, the big one 61pt tall and the small 29pt.
+const HUD = {
+  globe: 330, gap: 26, titleHeight: 61, detailHeight: 29, micStarts: 0.3,
+  starting: ['hud-dictation', 'hud-starting'],          // DICTATION / STARTING MIC (amber)
+  listening: ['hud-dictation', 'hud-listening'],        // DICTATION / LISTENING (no microphone named)
+  transcribing: ['hud-transcribing', 'hud-dictation-small'],   // TRANSCRIBING / DICTATION
+};
+
+// The line at the foot, in SF Mono: an image a line, set 20pt in a 34pt line, every character an
+// equal share of its width, so it is revealed a word at a time by clipping.
+const LINE_IMAGES = [{ name: 'line-1', w: 396, h: 34 }, { name: 'line-2', w: 285, h: 34 }];
+
+// Fills the caption with the lines, plain images as the HUD's labels are (the lens's fringes are
+// drop-shadows: see the CSS), and returns how to reveal the first `counts[i]` characters of each.
+function buildCaption(caption) {
+  caption.innerHTML = LINE_IMAGES.map(({ name, w, h }) =>
+    `<span class="redaction_line" style="width:calc(1.7em * ${w} / ${h})"><img src="${TEXT(name)}" alt=""></span>`).join('');
+  const lines = [...caption.children];
+  return (counts) => lines.forEach((line, i) => {
+    const shown = counts[i] / SPEECH.text[i].length;
+    line.style.clipPath = shown >= 1 ? 'none' : `inset(-4px ${(100 * (1 - shown)).toFixed(3)}% -4px 0)`;
+  });
+}
+
 function buildSpeech() {
   let seed = 7;
   const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
@@ -83,12 +114,13 @@ function buildSpeech() {
   LINES.forEach((line, li) => {
     let at = 0;
     line.forEach((word, wi) => {
+      const wordTo = at + (wi > 0 ? 1 : 0) + word.join('').length;
       word.forEach((syl, si) => {
         const from = at;
         at += syl.length + (si === 0 && wi > 0 ? 1 : 0);
         const dur = 0.13 + 0.03 * syl.length + 0.04 * random();
         const amp = STRESSED.has(syl) ? 0.85 + 0.15 * random() : 0.5 + 0.2 * random();
-        syllables.push({ line: li, start: t, dur, amp, from, to: at });
+        syllables.push({ line: li, start: t, dur, amp, from, to: at, wordTo });
         t += dur;
       });
       t += /[.]$/.test(word[word.length - 1]) ? 0 : 0.07;
@@ -758,6 +790,9 @@ function startGlobe(stage) {
     camera.setViewOffset(W, H, 0, (0.5 - centreY) * H, W, H);
     camera.updateProjectionMatrix();
     dotUniforms.size.value = Math.max(2.5, DOTS.size * D) * pr;
+    const hud = D / HUD.globe;
+    stateLabel.style.setProperty('--hud', hud.toFixed(4));
+    stateLabel.style.bottom = `${(H - (centreY * H - D / 2) + HUD.gap * hud).toFixed(1)}px`;
     // the caption's own colour fringes, the lens's direction at its height but only a hint of its
     // size: at full size it splits small text apart
     const captionY = caption.getBoundingClientRect().top - stage.getBoundingClientRect().top + caption.offsetHeight / 2;
@@ -765,23 +800,46 @@ function startGlobe(stage) {
     dirty = true;
   }
 
+  // ---------- State: the app's HUD labels, above the globe (RecordingHUD.swift) ----------
+  // While it hears: the gesture's name big, and what the microphone is doing and which one under it
+  // ("STARTING MIC" in amber until audio arrives). While it works: "TRANSCRIBING" big, the gesture
+  // under it. Sized to the globe as the app sizes them to its 330pt one.
+  // Only where the section asks for them (data-hud): the home page does; the kiosk's showpiece
+  // (/new-modality/) is the globe and its line alone.
+  const showsHud = 'hud' in section.dataset;
+  const stateLabel = document.createElement('div');
+  stateLabel.className = 'redaction_state';
+  stateLabel.setAttribute('aria-hidden', 'true');
+  stateLabel.innerHTML = '<img class="redaction_state_title" alt=""><img class="redaction_state_detail" alt="">';
+  if (showsHud) stage.appendChild(stateLabel);
+  const [stateTitle, stateDetail] = stateLabel.children;
+  if (showsHud) for (const name of new Set(['starting', 'listening', 'transcribing'].flatMap((k) => HUD[k]))) new Image().src = TEXT(name);
+  let shownState = '';
+  function showState(state) {
+    if (!showsHud || state === shownState) return;
+    shownState = state;
+    if (state) {
+      const [title, detail] = HUD[state];
+      stateTitle.src = TEXT(title);
+      stateDetail.src = TEXT(detail);
+    }
+    stateLabel.classList.toggle('redaction_state_on', !!state);
+  }
+
   // ---------- Caption ----------
-  const layers = [...caption.querySelectorAll('.redaction_caption_layer')];
+  const reveal = buildCaption(caption);
   let shownKey = '';
   function showCaption(counts) {
     const key = counts.join(',');
     if (key === shownKey) return;
     shownKey = key;
-    const html = SPEECH.text.map((line, i) =>
-      `${line.slice(0, counts[i])}<span class="redaction_unsaid">${line.slice(counts[i])}</span>`).join('<br>');
-    for (const layer of layers) layer.innerHTML = html;
+    reveal(counts);
   }
   function captionAt(t) {
     const counts = SPEECH.text.map(() => 0);
     for (const s of SPEECH.syllables) {
       if (t < s.start) break;
-      const f = Math.min(1, (t - s.start) / (s.dur * 0.7));
-      counts[s.line] = s.from + Math.round(f * (s.to - s.from));
+      counts[s.line] = s.wordTo;   // a whole word at a time, as it starts to be said
     }
     return counts;
   }
@@ -800,7 +858,7 @@ function startGlobe(stage) {
   // On a page of its own (data-replay, in seconds), the line comes round again after that long.
   const replay = Number(section.dataset.replay) || 0;
   let spin = 0, lastSpin = 0, lastTilt = START_TILT, follow = 1;
-  let env = 0, pulse = 1, wrap = 0, softness = 1;
+  let env = 0, pulse = 1, wrap = 0, softness = 1, bounce = 0, bounceV = 0, ringGain = 1, ringSwell = 1;
   let waveStartedAt = null, ringAt = null, traceAt = null, traceBright = false, nextTraceAt = Infinity;
   const flicker = createFlicker();
   const wallQ = new THREE.Quaternion(), dq = new THREE.Quaternion();
@@ -830,14 +888,17 @@ function startGlobe(stage) {
     }
     const intro = reduceMotion ? INTRO_LENGTH : introAt == null ? 0 : clock - introAt;
     const inIntro = intro < INTRO_LENGTH;
-    const sp = reduceMotion || speechAt == null ? -1 : clock - speechAt;
-    const listenEnd = SPEECH.end + 0.15, workEnd = listenEnd + WAVE.sweep + WAVE.rest;
-    const listening = sp >= 0 && sp < listenEnd, working = sp >= listenEnd && sp < workEnd;
+    // `sp` is the line's own clock, quicker than the page's; once it is heard, the globe works at its own pace
+    const since = reduceMotion || speechAt == null ? -1 : clock - speechAt;
+    const sp = since < 0 ? -1 : since * SPEECH_TEMPO;
+    const listenEnd = SPEECH.end + 0.15, heardAt = listenEnd / SPEECH_TEMPO, workEnd = heardAt + WAVE.sweep + WAVE.rest;
+    const listening = sp >= 0 && sp < listenEnd, working = since >= heardAt && since < workEnd;
     const idle = !inIntro && !listening && !working;
-    if (sp >= workEnd && !succeeded) {
+    showState(listening ? (sp < HUD.micStarts ? 'starting' : 'listening') : working ? 'transcribing' : '');
+    if (since >= workEnd && !succeeded) {
       succeeded = true;
       successAt = clock;
-      ringAt = clock;
+      ringAt = clock; ringGain = 1; ringSwell = 1;
       nextTraceAt = clock + rand(3, 6);
     }
 
@@ -857,7 +918,12 @@ function startGlobe(stage) {
     const raw = listening ? loudnessAt(sp) : 0;
     env += (raw - env) * (1 - Math.exp(-dt / (raw > env ? 0.03 : 0.15)));
     pulse += (1 + LOUDNESS_GAIN * env - pulse) * (1 - Math.exp(-dt / 0.05));
-    lean.scale.setScalar(pulse);
+    // a tap's bounce: a spring, pushed in and settling back
+    bounceV += (-TOUCH.stiffness * bounce - TOUCH.damping * bounceV) * dt;
+    bounce += bounceV * dt;
+    if (Math.abs(bounce) < 1e-4 && Math.abs(bounceV) < 1e-3) bounce = bounceV = 0;
+    const size = pulse * (1 + bounce);
+    lean.scale.setScalar(size);
     // the arrow wraps round the globe while it hears and works, and lies flat again after
     const wrapGoal = listening || working ? 1 : 0;
     wrap += (wrapGoal - wrap) * (1 - Math.exp(-WRAP_RATE * dt));
@@ -907,7 +973,7 @@ function startGlobe(stage) {
     lastSpin = spin; lastTilt = tilt;
     wall.quaternion.copy(wallQ);
     dotUniforms.opacity.value = reduceMotion ? 1 : Math.min(1, Math.max(0, intro / 0.8));
-    mask.scale.setScalar(grown * pulse);
+    mask.scale.setScalar(grown * size);
     // a success's ring of white, out from behind the globe, every dot swelling as it leaves
     let swell = 0;
     if (ringAt != null) {
@@ -916,9 +982,9 @@ function startGlobe(stage) {
       const el = clock - ringAt, front = corner * el / RING.run, tail = corner * RING.tail;
       if (front > corner + tail * 6) { ringAt = null; dotUniforms.ring.value.set(0, 1, 1, 0); }
       else {
-        dotUniforms.ring.value.set(front, tail, corner * RING.edge, 1);
+        dotUniforms.ring.value.set(front, tail, corner * RING.edge, ringGain);
         const run = el / RING.run;
-        swell = run < RING.swellRise ? run / RING.swellRise : Math.exp(-(run - RING.swellRise) / RING.swellFall);
+        swell = ringSwell * (run < RING.swellRise ? run / RING.swellRise : Math.exp(-(run - RING.swellRise) / RING.swellFall));
       }
     }
     const baseSize = Math.max(2.5, DOTS.size * D) * pr;
@@ -927,7 +993,7 @@ function startGlobe(stage) {
     // ----- the lamp and the eye, in the globe's own frame -----
     scene.updateMatrixWorld();
     uniforms.globeFromWorld.value.copy(spinner.matrixWorld).invert();
-    const radius = grown * pulse;
+    const radius = grown * size;
     uniforms.eyeG.value.copy(camera.position).applyMatrix4(uniforms.globeFromWorld.value);
     tmpV.set(0, 0, 0).addScaledVector(camUp, 1.4 * radius).addScaledVector(camBack, 0.7 * radius);
     uniforms.lampG.value.copy(tmpV).applyMatrix4(uniforms.globeFromWorld.value);
@@ -998,12 +1064,25 @@ function startGlobe(stage) {
       speechAt = null;
       engaged = false;
       if (!reduceMotion) showCaption(SPEECH.text.map(() => 0));
-      env = 0; pulse = 1; wrap = 0; softness = 1; waveStartedAt = null; ringAt = null; traceAt = null;
+      env = 0; pulse = 1; wrap = 0; softness = 1; bounce = bounceV = 0; waveStartedAt = null; ringAt = null; traceAt = null;
+      showState('');
       dotUniforms.ring.value.set(0, 1, 1, 0);
     }
     if (visible) { last = null; kick(); }
   }, { threshold: [0, ENGAGE] });
   seen.observe(section);
+
+  // Touching the globe: it gives a little and springs back, and a soft ring runs out over the dots.
+  // The stage lets pointers through, so the section hears them; only taps on (or near) the globe count.
+  section.addEventListener('pointerdown', (e) => {
+    if (reduceMotion || !visible || introAt == null) return;
+    const box = stage.getBoundingClientRect();
+    const dx = e.clientX - box.left - W / 2, dy = e.clientY - box.top - centreY * H;
+    if (Math.hypot(dx, dy) > D * 0.62) return;
+    bounceV += TOUCH.push;
+    if (ringAt == null || ringGain < 1) { ringAt = clock; ringGain = TOUCH.ring; ringSwell = TOUCH.swell; }
+    kick();
+  });
   new ResizeObserver(() => { layout(); kick(); }).observe(stage);
   layout();
 
@@ -1039,10 +1118,7 @@ if (section) {
   whenStageArrives(section, (stage) => {
     const fallBack = () => {
       stage.dataset.fallback = '';
-      const caption = stage.querySelector('.redaction_caption');
-      for (const layer of caption.querySelectorAll('.redaction_caption_layer')) {
-        layer.innerHTML = SPEECH.text.join('<br>');
-      }
+      buildCaption(stage.querySelector('.redaction_caption'))(SPEECH.text.map((l) => l.length));
     };
     if (!hasWebGL2()) return fallBack();
     try { startGlobe(stage); } catch (err) { console.warn('Redaction project globe unavailable', err); fallBack(); }
