@@ -775,20 +775,68 @@ function startGlobe(stage) {
   }
 
   // ---------- Layout ----------
-  let W = 1, H = 1, pr = 1, D = 1, vfov = 20, centreY = 0.44;
+  let W = 1, H = 1, pr = 1, D = 1, vfov = 20, centreY = 0.44, cx = 0.5;
   function layout() {
     W = Math.max(1, stage.clientWidth); H = Math.max(1, stage.clientHeight);
     pr = Math.min(window.devicePixelRatio || 1, LITE ? 1 : 1.75);
     renderer.setPixelRatio(pr);
     renderer.setSize(W, H, false);
     for (const t of Object.values(targets)) t.setSize(Math.round(W * pr), Math.round(H * pr));
-    D = Math.min(W * 0.5, H * 0.34) * (LITE ? LITE_SCALE : 1);
+    placed = null;
+    place();
+  }
+
+  // ---------- Where the globe sits: centred, or aside for the write-up ----------
+  // After the line, the section's write-up (.redaction_story: icon, title, text, as the other
+  // projects have) scrolls up over the globe. If the globe clears the text column where it is, it
+  // stays in the middle; if not, it slides into the space right of the text, as the other projects'
+  // pictures sit, and shrinks to fit it. Where the text takes the whole width (phones), it dims
+  // behind it instead. The line and the labels go as the text comes.
+  //
+  // The scroll only says whether the write-up has come (its top past a quarter of the way up the
+  // screen); the globe gets there on a critically damped spring of its own, about a second, so a
+  // hard flick of the page doesn't throw it across.
+  // (looked for until it arrives: it is an include of its own, so it can land after the globe starts)
+  const story = section.querySelector('.redaction_story');
+  let storyText = null, placed = null, aside = 0, asideV = 0, storyCame = false;
+  const ASIDE_RATE = 6;   // the spring's ω: settles in about a second
+  function place(dt = 0) {
+    if (story && !storyText) storyText = story.querySelector('.container_one');
+    const D0 = Math.min(W * 0.5, H * 0.34) * (LITE ? LITE_SCALE : 1);
+    let arrived = 0, toX = W / 2, toD = D0, dim = 0;
+    if (story && storyText) {
+      const top = story.getBoundingClientRect().top - stage.getBoundingClientRect().top;
+      const goal = top < H * 0.75 ? 1 : 0;
+      storyCame = goal === 1;
+      if (reduceMotion) { aside = goal; asideV = 0; }
+      else if (dt > 0) {
+        asideV += (ASIDE_RATE * ASIDE_RATE * (goal - aside) - 2 * ASIDE_RATE * asideV) * dt;
+        aside += asideV * dt;
+        if (Math.abs(goal - aside) < 1e-3 && Math.abs(asideV) < 1e-3) { aside = goal; asideV = 0; }
+      }
+      arrived = ease(aside);
+      const textRight = storyText.getBoundingClientRect().right - stage.getBoundingClientRect().left;
+      const room = W - textRight;
+      if (textRight > W * 0.8) dim = 0.75;                       // the text has the whole width
+      else if (W / 2 - D0 / 2 < textRight + 24) {                 // in the text's way: aside
+        toX = textRight + room / 2;
+        toD = Math.min(D0, room * 0.75, H * 0.5);
+      }
+    }
+    const key = `${W}|${H}|${arrived.toFixed(4)}|${toX.toFixed(1)}|${toD.toFixed(1)}`;
+    if (key === placed) return;
+    placed = key;
+    cx = W / 2 + (toX - W / 2) * arrived;
+    D = D0 + (toD - D0) * arrived;
+    canvas.style.opacity = dim ? (1 - dim * arrived).toFixed(3) : '';
+    stage.style.setProperty('--told', (1 - arrived).toFixed(3));
     vfov = 2 * Math.atan(H * TAN_R / D) * 180 / Math.PI;
     camera.fov = vfov;
     camera.aspect = W / H;
-    // the globe (on the view axis) drawn at `centreY` of the height rather than the middle
-    camera.setViewOffset(W, H, 0, (0.5 - centreY) * H, W, H);
+    // the globe (on the view axis) drawn at `cx` across and `centreY` down rather than the middle
+    camera.setViewOffset(W, H, W / 2 - cx, (0.5 - centreY) * H, W, H);
     camera.updateProjectionMatrix();
+    finalMaterial.uniforms.centre.value.set(cx / W, 0.5);
     dotUniforms.size.value = Math.max(2.5, DOTS.size * D) * pr;
     const hud = D / HUD.globe;
     stateLabel.style.setProperty('--hud', hud.toFixed(4));
@@ -873,10 +921,14 @@ function startGlobe(stage) {
     raf = 0;
     const dt = last == null ? 0 : Math.min(0.1, (now - last) / 1000);
     last = now;
+    place(dt);
     clock += dt;
 
     // ----- the timeline -----
     if (engaged && introAt == null) { introAt = clock; speechAt = clock + INTRO_LENGTH + 0.4; }
+    // Arrived part-way down, at the write-up (a reload there, or a jump): the first screen was never
+    // seen, so the globe comes in now, beside the text, and the line waits to be scrolled up to.
+    if (!engaged && visible && introAt == null && storyCame) { introAt = clock; needsSpeech = true; }
     if (replay && succeeded && !needsSpeech && clock - successAt > replay) {
       needsSpeech = true;
       showCaption(SPEECH.text.map(() => 0));
@@ -978,7 +1030,7 @@ function startGlobe(stage) {
     let swell = 0;
     if (ringAt != null) {
       const pxToTan = 2 * Math.tan(vfov * Math.PI / 360) / H;
-      const corner = Math.hypot(W / 2, Math.max(centreY, 1 - centreY) * H) * pxToTan;
+      const corner = Math.hypot(Math.max(cx, W - cx), Math.max(centreY, 1 - centreY) * H) * pxToTan;
       const el = clock - ringAt, front = corner * el / RING.run, tail = corner * RING.tail;
       if (front > corner + tail * 6) { ringAt = null; dotUniforms.ring.value.set(0, 1, 1, 0); }
       else {
@@ -1054,11 +1106,19 @@ function startGlobe(stage) {
 
   // Only drawn while the section is on screen; the intro once a good part of it is in view, and the
   // line said again each time it comes back after leaving altogether.
+  // Engaged by the section's first screen (.redaction_intro), the part the line is said in, so a
+  // long write-up after it doesn't keep the section from ever being a good part in view.
   const ENGAGE = 0.35;
+  const opening = section.querySelector('.redaction_intro') || section;
+  let openingShown = 0;
+  new IntersectionObserver(([entry]) => {
+    openingShown = entry.intersectionRatio;
+    if (openingShown >= ENGAGE && visible) { engaged = true; kick(); }
+  }, { threshold: [0, ENGAGE] }).observe(opening);
   const seen = new IntersectionObserver(([entry]) => {
     const wasVisible = visible;
     visible = entry.isIntersecting;
-    engaged = entry.intersectionRatio >= ENGAGE || (engaged && visible);
+    engaged = (visible && openingShown >= ENGAGE) || (engaged && visible);
     if (!visible && wasVisible && speechAt != null) {
       needsSpeech = true;
       speechAt = null;
@@ -1069,7 +1129,7 @@ function startGlobe(stage) {
       dotUniforms.ring.value.set(0, 1, 1, 0);
     }
     if (visible) { last = null; kick(); }
-  }, { threshold: [0, ENGAGE] });
+  }, { threshold: 0 });
   seen.observe(section);
 
   // Touching the globe: it gives a little and springs back, and a soft ring runs out over the dots.
@@ -1077,7 +1137,7 @@ function startGlobe(stage) {
   section.addEventListener('pointerdown', (e) => {
     if (reduceMotion || !visible || introAt == null) return;
     const box = stage.getBoundingClientRect();
-    const dx = e.clientX - box.left - W / 2, dy = e.clientY - box.top - centreY * H;
+    const dx = e.clientX - box.left - cx, dy = e.clientY - box.top - centreY * H;
     if (Math.hypot(dx, dy) > D * 0.62) return;
     bounceV += TOUCH.push;
     if (ringAt == null || ringGain < 1) { ringAt = clock; ringGain = TOUCH.ring; ringSwell = TOUCH.swell; }

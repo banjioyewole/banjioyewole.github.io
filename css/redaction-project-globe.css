@@ -1,12 +1,26 @@
 /* new-modality's window: a full-height gap in the page that looks through it to the redaction
    project globe (js/redaction-project-globe.js). The stage is fixed to the screen, and the section's
-   clip-path cuts it to the section's own box, so the page scrolls past it like a window. */
+   clip-path cuts it to the section's own box, so the page scrolls past it like a window.
+   Its first screen (.redaction_intro) is where the line is said; on the home page the write-up
+   (.redaction_story) follows it, scrolling up over the globe, which moves aside for it. */
 .redaction_window {
   position: relative;
-  height: 100vh;
-  height: 100lvh;
+  min-height: 100vh;
+  min-height: 100lvh;
   clip-path: inset(0);
 }
+.redaction_intro {
+  height: 100vh;
+  height: 100lvh;
+}
+.redaction_story {
+  position: relative;
+  z-index: 1;
+  /* room to scroll past the text, over the globe, before the rest of the page comes */
+  padding-bottom: 12.5vh;
+}
+/* the line and the labels go as the write-up comes (--told, set by the script) */
+.redaction_caption { opacity: var(--told, 1); }
 
 .redaction_stage {
   position: fixed;
@@ -82,7 +96,7 @@
   transition: opacity 0.25s ease;
   --hud: 1;
 }
-.redaction_state.redaction_state_on { opacity: 1; }
+.redaction_state.redaction_state_on { opacity: var(--told, 1); }
 .redaction_state img { display: block; margin: 0 auto; max-width: 100%; width: auto; }
 .redaction_state_title { height: calc(61px * var(--hud)); }
 .redaction_state_detail { height: calc(29px * var(--hud)); }
